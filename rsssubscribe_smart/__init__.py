@@ -16,7 +16,7 @@ from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.db import SessionFactory
 from app.db.models.transferhistory import TransferHistory
 from app.modules.qbittorrent import QbittorrentModule
-from .smart_guard import Guard, exclusive, resolution
+from .smart_guard import Guard, exclusive, resolution, rule_matches
 from app.core.config import settings
 from app.core.context import MediaInfo, TorrentInfo, Context
 from app.core.metainfo import MetaInfo
@@ -49,7 +49,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.2.0-file-select"
+    plugin_version = "0.3.0-media-rules"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -80,6 +80,10 @@ class RssSubscribeSmart(_PluginBase):
     _action: str = "subscribe"
     _save_path: str = ""
     _size_range: str = ""
+    _tv_min_resolution: int = 0
+    _movie_min_resolution: int = 0
+    _tv_subtitle_mode: str = "any"
+    _movie_subtitle_mode: str = "any"
 
     def init_plugin(self, config: dict = None):
 
@@ -102,6 +106,10 @@ class RssSubscribeSmart(_PluginBase):
             self._action = config.get("action")
             self._save_path = config.get("save_path")
             self._size_range = config.get("size_range")
+            self._tv_min_resolution = int(config.get("tv_min_resolution") or 0)
+            self._movie_min_resolution = int(config.get("movie_min_resolution") or 0)
+            self._tv_subtitle_mode = config.get("tv_subtitle_mode") or "any"
+            self._movie_subtitle_mode = config.get("movie_subtitle_mode") or "any"
 
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -350,42 +358,41 @@ class RssSubscribeSmart(_PluginBase):
                         ]
                     },
                     {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'size_range',
-                                            'label': '种子大小(GB)',
-                                            'placeholder': '如：3 或 3-5'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'save_path',
-                                            'label': '保存目录',
-                                            'placeholder': '下载时有效，留空自动'
-                                        }
-                                    }
-                                ]
-                            }
+                        'component': 'VRow', 'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{
+                                'component': 'VSelect', 'props': {'model': 'tv_min_resolution', 'label': '电视剧最低分辨率', 'items': [
+                                    {'title': '不限', 'value': 0}, {'title': '720p', 'value': 720}, {'title': '1080p', 'value': 1080}, {'title': '2160p / 4K', 'value': 2160}
+                                ]}
+                            }]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{
+                                'component': 'VSelect', 'props': {'model': 'movie_min_resolution', 'label': '电影最低分辨率', 'items': [
+                                    {'title': '不限', 'value': 0}, {'title': '720p', 'value': 720}, {'title': '1080p', 'value': 1080}, {'title': '2160p / 4K', 'value': 2160}
+                                ]}
+                            }]}
+                        ]
+                    },
+                    {
+                        'component': 'VRow', 'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{
+                                'component': 'VSelect', 'props': {'model': 'tv_subtitle_mode', 'label': '电视剧中文字幕', 'items': [
+                                    {'title': '不限', 'value': 'any'}, {'title': '必须有中文字幕', 'value': 'required'}, {'title': '必须无中文字幕', 'value': 'forbidden'}
+                                ]}
+                            }]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{
+                                'component': 'VSelect', 'props': {'model': 'movie_subtitle_mode', 'label': '电影中文字幕', 'items': [
+                                    {'title': '不限', 'value': 'any'}, {'title': '必须有中文字幕', 'value': 'required'}, {'title': '必须无中文字幕', 'value': 'forbidden'}
+                                ]}
+                            }]}
+                        ]
+                    },
+                    {
+                        'component': 'VRow', 'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{
+                                'component': 'VTextField', 'props': {'model': 'size_range', 'label': '种子大小(GB)', 'placeholder': '如：3 或 3-5'}
+                            }]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{
+                                'component': 'VTextField', 'props': {'model': 'save_path', 'label': '保存目录', 'placeholder': '下载时有效，留空自动'}
+                            }]}
                         ]
                     },
                     {
@@ -455,7 +462,11 @@ class RssSubscribeSmart(_PluginBase):
             "filter": False,
             "action": "subscribe",
             "save_path": "",
-            "size_range": ""
+            "size_range": "",
+            "tv_min_resolution": 0,
+            "movie_min_resolution": 0,
+            "tv_subtitle_mode": "any",
+            "movie_subtitle_mode": "any"
         }
 
     def get_page(self) -> List[dict]:
@@ -699,6 +710,14 @@ class RssSubscribeSmart(_PluginBase):
                     mediainfo: MediaInfo = self.chain.recognize_media(meta=meta)
                     if not mediainfo:
                         logger.warn(f'未识别到媒体信息，标题：{title}')
+                        continue
+                    media_rule_resolution = self._tv_min_resolution if mediainfo.type == MediaType.TV else self._movie_min_resolution
+                    media_rule_subtitle = self._tv_subtitle_mode if mediainfo.type == MediaType.TV else self._movie_subtitle_mode
+                    rule_ok, rule_reason = rule_matches(
+                        f"{title} {description}", media_rule_resolution, media_rule_subtitle
+                    )
+                    if not rule_ok:
+                        logger.info(f"RSS_RULE_SKIP {title}: {rule_reason}")
                         continue
                     # 种子
                     torrentinfo = TorrentInfo(

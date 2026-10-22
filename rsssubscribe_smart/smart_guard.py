@@ -25,6 +25,27 @@ def blocks(candidate, existing):
     return not (candidate == 2160 and existing == 1080)
 
 
+def has_chinese_subtitle(text):
+    """Return whether title/description explicitly advertises Chinese subtitles."""
+    return bool(re.search(
+        r'(?i)(中字|简中|繁中|简繁|中文字幕|中文字幕|CHS|CHT|GB\b|BIG5\b|中文翻译|\bChinese(?:\.Sub|[ ._-]*Subtitle))',
+        text or '',
+    ))
+
+
+def rule_matches(text, minimum_resolution=0, subtitle_mode='any'):
+    """Apply a conservative RSS quality/subtitle rule to visible metadata."""
+    current = resolution(text)
+    if minimum_resolution and current < int(minimum_resolution):
+        return False, f'分辨率 {current or "未知"} 低于要求 {minimum_resolution}'
+    subtitle = has_chinese_subtitle(text)
+    if subtitle_mode == 'required' and not subtitle:
+        return False, '未标注中文字幕'
+    if subtitle_mode == 'forbidden' and subtitle:
+        return False, '标注了中文字幕'
+    return True, ''
+
+
 def identity(media):
     mid = getattr(media, 'tmdb_id', None)
     kind = getattr(getattr(media, 'type', None), 'value', None)

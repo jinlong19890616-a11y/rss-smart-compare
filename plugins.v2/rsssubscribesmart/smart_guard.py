@@ -19,6 +19,22 @@ def resolution(text):
     return max(values, default=0)
 
 
+def has_chinese_subtitle(text):
+    return bool(re.search(r'(?i)(中字|简中|繁中|简繁|中文字幕|CHS|CHT|GB\\b|BIG5\\b|中文翻译|\\bChinese(?:\\.Sub|[ ._-]*Subtitle))', text or ''))
+
+
+def rule_matches(text, minimum_resolution=0, subtitle_mode='any'):
+    current = resolution(text)
+    if minimum_resolution and current < int(minimum_resolution):
+        return False, f'分辨率 {current or "未知"} 低于要求 {minimum_resolution}'
+    subtitle = has_chinese_subtitle(text)
+    if subtitle_mode == 'required' and not subtitle:
+        return False, '未标注中文字幕'
+    if subtitle_mode == 'forbidden' and subtitle:
+        return False, '标注了中文字幕'
+    return True, ''
+
+
 def blocks(candidate, existing):
     # Only the explicitly requested 1080p -> 2160p upgrade is automatic.
     # Unknown quality is not evidence that a new download is an upgrade.
