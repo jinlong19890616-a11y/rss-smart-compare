@@ -49,7 +49,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.3.0-media-rules"
+    plugin_version = "0.4.0-logic-fixes"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -641,6 +641,7 @@ class RssSubscribeSmart(_PluginBase):
         subscribechain = SubscribeChain()
         # Collect all feeds before selecting any resource; higher resolution first.
         batch = []
+        seen_fingerprints = set()
         for url in self._address.split("\n"):
             if not url.strip():
                 continue
@@ -662,11 +663,16 @@ class RssSubscribeSmart(_PluginBase):
             for result in results:
                 try:
                     title = result.get("title")
-                    description = result.get("description")
-                    enclosure = result.get("enclosure")
-                    link = result.get("link")
-                    size = result.get("size")
+                    description = result.get("description") or ""
+                    enclosure = result.get("enclosure") or ""
+                    link = result.get("link") or ""
+                    size = result.get("size") or 0
                     pubdate: datetime.datetime = result.get("pubdate")
+                    fingerprint = (str(title).strip(), str(size), str(enclosure or link).strip())
+                    if fingerprint in seen_fingerprints:
+                        logger.info(f"RSS_DUPLICATE_SKIP {title}: 本轮重复资源")
+                        continue
+                    seen_fingerprints.add(fingerprint)
                     # 检查是否处理过
                     if not title or (self._action != "download" and title in [h.get("key") for h in history]):
                         continue
@@ -709,7 +715,7 @@ class RssSubscribeSmart(_PluginBase):
                         continue
                     mediainfo: MediaInfo = self.chain.recognize_media(meta=meta)
                     if not mediainfo:
-                        logger.warn(f'未识别到媒体信息，标题：{title}')
+                        logger.warn(f'RSS_IDENTITY_DEFER {title}: 未识别到媒体信息')
                         continue
                     media_rule_resolution = self._tv_min_resolution if mediainfo.type == MediaType.TV else self._movie_min_resolution
                     media_rule_subtitle = self._tv_subtitle_mode if mediainfo.type == MediaType.TV else self._movie_subtitle_mode
@@ -791,6 +797,12 @@ class RssSubscribeSmart(_PluginBase):
                             download_episodes = selected
                             if download_episodes is None and mediainfo.type == MediaType.TV:
                                 download_episodes = set(meta.episode_list or [])
+                            if mediainfo.type == MediaType.TV:
+                                logger.info(
+                                    f"RSS_FILE_SELECT_PLAN {mediainfo.title_year}: "
+                                    f"目标集={sorted(download_episodes or [])}; "
+                                    f"媒体库/任务已有集将由MoviePilot文件选择器设为priority=0"
+                                )
                             result = downloadchain.download_single(
                                 context=Context(meta_info=meta, media_info=mediainfo,
                                                 torrent_info=torrentinfo),
@@ -829,7 +841,7 @@ class RssSubscribeSmart(_PluginBase):
                         "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     })
                 except Exception as err:
-                    logger.error(f'刷新RSS数据出错：{str(err)} - {traceback.format_exc()}')
+                    logger.error(f'RSS_ITEM_DEFER {title if "title" in locals() else "<unknown>"}: {str(err)}')
             logger.info(f"RSS {url} 刷新完成")
         # 保存历史记录
         self.save_data('history', history)
