@@ -49,7 +49,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.1.0-compare"
+    plugin_version = "0.1.2-safe-season"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -749,6 +749,15 @@ class RssSubscribeSmart(_PluginBase):
                             reason, selected = guard.decide(mediainfo, meta, live_existing)
                             if reason:
                                 logger.info(f"RSS_DEDUPE_SKIP {mediainfo.title_year} {meta.season_episode}: {reason}")
+                                continue
+                            # Safety stop: season packs must not be submitted as a
+                            # full-season download until file-level qBittorrent
+                            # selection is wired into this independent plugin.
+                            if mediainfo.type == MediaType.TV and not (meta.episode_list or []):
+                                logger.warning(
+                                    f"RSS_SMART_DEFER {mediainfo.title_year} {meta.season}: "
+                                    "整季资源未接入文件级选择，禁止直接下载"
+                                )
                                 continue
                             if selected:
                                 logger.info(f"RSS_DEDUPE_PARTIAL {mediainfo.title_year}: 仅下载缺失集 {sorted(selected)}")
