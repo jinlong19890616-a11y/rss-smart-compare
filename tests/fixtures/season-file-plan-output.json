@@ -1,0 +1,60 @@
+{
+  "status": "apply",
+  "reason": "只选择媒体库缺失集",
+  "decisions": [
+    {
+      "index": 0,
+      "name": "Show.S01E01.mkv",
+      "action": "skip",
+      "priority": 0,
+      "season": 1,
+      "episode": 1,
+      "reason": "媒体库已有该集"
+    },
+    {
+      "index": 1,
+      "name": "Show.S01E02.mkv",
+      "action": "skip",
+      "priority": 0,
+      "season": 1,
+      "episode": 2,
+      "reason": "媒体库已有该集"
+    },
+    {
+      "index": 2,
+      "name": "Show.S01E03.mkv",
+      "action": "download",
+      "priority": 1,
+      "season": 1,
+      "episode": 3,
+      "reason": "媒体库缺少该集"
+    },
+    {
+      "index": 3,
+      "name": "Show.S01E04.mkv",
+      "action": "skip",
+      "priority": 0,
+      "season": 1,
+      "episode": 4,
+      "reason": "媒体库已有该集"
+    },
+    {
+      "index": 4,
+      "name": "Show.S01E05.mkv",
+      "action": "download",
+      "priority": 1,
+      "season": 1,
+      "episode": 5,
+      "reason": "媒体库缺少该集"
+    },
+    {
+      "index": 5,
+      "name": "Show.S01E01-E05.nfo",
+      "action": "defer",
+      "priority": null,
+      "season": null,
+      "episode": null,
+      "reason": "包含非视频文件"
+    }
+  ]
+}

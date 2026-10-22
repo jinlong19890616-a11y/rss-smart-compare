@@ -1,0 +1,77 @@
+[
+  {
+    "title": "Example.Show.S01E03.1080p",
+    "season": 1,
+    "candidate_episodes": [
+      3
+    ],
+    "library_episodes": [
+      1,
+      2,
+      4,
+      20
+    ],
+    "missing_episodes": [
+      3
+    ],
+    "legacy": "下载整条 RSS 资源",
+    "smart": "下载全部候选集",
+    "note": "库中没有候选集"
+  },
+  {
+    "title": "Example.Show.S01E01-E05.2160p",
+    "season": 1,
+    "candidate_episodes": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "library_episodes": [
+      1,
+      2,
+      4,
+      20
+    ],
+    "missing_episodes": [
+      3,
+      5
+    ],
+    "legacy": "可能下载整季/整包：存在重复风险",
+    "smart": "只下载缺失集",
+    "note": "qBittorrent 必须返回独立视频文件，压缩包无法按集拆分"
+  },
+  {
+    "title": "Example.Show.S01E20-E22.1080p",
+    "season": 1,
+    "candidate_episodes": [
+      20,
+      21,
+      22
+    ],
+    "library_episodes": [
+      1,
+      2,
+      4,
+      20
+    ],
+    "missing_episodes": [
+      21,
+      22
+    ],
+    "legacy": "可能下载整季/整包：存在重复风险",
+    "smart": "只下载缺失集",
+    "note": "qBittorrent 必须返回独立视频文件，压缩包无法按集拆分"
+  },
+  {
+    "title": "Unknown.Release.2160p",
+    "season": null,
+    "candidate_episodes": [],
+    "library_episodes": [],
+    "missing_episodes": [],
+    "legacy": "无法识别，跳过/人工处理",
+    "smart": "延后人工处理",
+    "note": "未识别到明确 SxxEyy 或范围"
+  }
+]

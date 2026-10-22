@@ -1,0 +1,14 @@
+{
+  "scenario": "S01E01-E05, library has E01/E02/E04",
+  "fake_calls": [
+    ["add", "magnet:?xt=urn:test", "/downloads"],
+    ["files", "abc123"],
+    ["priority", "abc123", [0, 1, 3], 0],
+    ["priority", "abc123", [2, 4], 1]
+  ],
+  "expected": {
+    "existing_files_priority": 0,
+    "missing_files_priority": 1,
+    "download_file_indexes": [2, 4]
+  }
+}

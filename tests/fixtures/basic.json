@@ -1,0 +1,11 @@
+{
+  "library": {
+    "1": [1, 2, 4, 20]
+  },
+  "rss": [
+    {"title": "Example.Show.S01E03.1080p"},
+    {"title": "Example.Show.S01E01-E05.2160p"},
+    {"title": "Example.Show.S01E20-E22.1080p"},
+    {"title": "Unknown.Release.2160p"}
+  ]
+}

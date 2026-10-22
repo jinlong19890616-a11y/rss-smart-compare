@@ -1,0 +1,12 @@
+{
+  "season": 1,
+  "existing": [1, 2, 4],
+  "files": [
+    {"index": 0, "name": "Show.S01E01.mkv"},
+    {"index": 1, "name": "Show.S01E02.mkv"},
+    {"index": 2, "name": "Show.S01E03.mkv"},
+    {"index": 3, "name": "Show.S01E04.mkv"},
+    {"index": 4, "name": "Show.S01E05.mkv"},
+    {"index": 5, "name": "Show.S01E01-E05.nfo"}
+  ]
+}
