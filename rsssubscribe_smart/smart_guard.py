@@ -3,9 +3,11 @@ Identity: media type + TMDB + exact season/episode. Unknown overlap defers.
 """
 import contextlib
 import fcntl
+import html
 import json
 import re
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 
 VIDEO = {'.mkv', '.mp4', '.avi', '.ts', '.m2ts', '.mov', '.wmv', '.webm', '.mpeg', '.mpg'}
@@ -26,10 +28,11 @@ def blocks(candidate, existing):
 
 
 def has_chinese_subtitle(text):
-    """Return whether title/description explicitly advertises Chinese subtitles."""
+    """Return whether RSS metadata explicitly advertises Chinese subtitles."""
+    text = html.unescape(html.unescape(text or ''))
     return bool(re.search(
-        r'(?i)(中字|简中|繁中|简繁|中文字幕|中文字幕|CHS|CHT|GB\b|BIG5\b|中文翻译|\bChinese(?:\.Sub|[ ._-]*Subtitle))',
-        text or '',
+        r'(?i)(中字|简中|繁中|简繁|中文字幕|中文字幕|中英|简英|繁英|CHS|CHT|GB\b|BIG5\b|中文翻译|国配|国语|粤语|中字内封|内封中字|外挂中字|双语|中日双语|中韩双语|\bChinese(?:\.Sub|[ ._-]*Subtitle)|\bCNSUB\b)',
+        text,
     ))
 
 

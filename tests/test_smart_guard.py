@@ -28,5 +28,7 @@ class Tests(unittest.TestCase):
         self.assertTrue(rule_matches('Show.S01E01.1080p.中字', 1080, 'required')[0])
         self.assertFalse(rule_matches('Show.S01E01.1080p.WEB-DL', 1080, 'required')[0])
         self.assertTrue(has_chinese_subtitle('Movie.1080p.CHS'))
+        self.assertTrue(has_chinese_subtitle('Movie.1080p.内封中字'))
+        self.assertTrue(has_chinese_subtitle('Movie.1080p.&amp;#x4E2D;&amp;#x5B57;'))
 
 if __name__=='__main__': unittest.main(verbosity=2)

@@ -3,14 +3,15 @@
     "name": "智能补集 RSS",
     "description": "按媒体库已有集数跳过重复，并按电视剧/电影分别设置分辨率与中文字幕规则；整季包按 qBittorrent 文件选择缺集。",
     "labels": "订阅,下载,辅助",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "icon": "https://raw.githubusercontent.com/jinlong19890616-a11y/rss-smart-compare/main/icon.png",
     "author": "jinlong19890616-a11y",
     "level": 2,
     "v3": false,
     "release": false,
     "history": {
-      "0.3.0": "增加电视剧/电影分辨率门槛和中文字幕要求的可视化规则；未满足规则仅跳过并记录。",
+      "0.3.1": "扩大中文字幕标记识别，支持内封/外挂中字、双语、国配、简英繁英、HTML实体和常见英文标记。"
+      ,"0.3.0": "增加电视剧/电影分辨率门槛和中文字幕要求的可视化规则；未满足规则仅跳过并记录。",
       "0.2.0": "整季资源读取 TMDB 该季集数，交给 MoviePilot 原生 qBittorrent 文件选择流程；无法取得集数时安全延后。"
     }
   }
