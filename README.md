@@ -37,4 +37,4 @@ python3 rsssubscribe_smart/dryrun_compare.py tests/fixtures/basic.json
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-当前只是在 Mac 资料盘完成本地验证，未安装到 OVH 下载机。
+当前代码已发布到 GitHub，并可通过 MoviePilot V2 插件市场安装；真实 OVH 测试仍需在插件停用状态下先更新，再选择小型测试资源验证。
