@@ -1,0 +1,16 @@
+{
+  "RssSubscribeSmart": {
+    "name": "智能补集 RSS",
+    "description": "按媒体库已有集数跳过重复，仅补齐缺失集；整季包按 qBittorrent 独立视频文件选择缺集。",
+    "labels": "订阅,下载,辅助",
+    "version": "0.1.1",
+    "icon": "https://raw.githubusercontent.com/jinlong19890616-a11y/rss-smart-compare/main/icon.png",
+    "author": "jinlong19890616-a11y",
+    "level": 2,
+    "v3": false,
+    "release": false,
+    "history": {
+      "0.1.1": "补齐 MoviePilot V2 插件市场索引和 plugins.v2 目录结构；独立测试版。"
+    }
+  }
+}
