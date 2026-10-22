@@ -49,7 +49,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.1.2-safe-season"
+    plugin_version = "0.2.0-file-select"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -746,18 +746,25 @@ class RssSubscribeSmart(_PluginBase):
                                           DownloadHistoryOper(), logger,
                                           transferred=verified_transfer_candidates)
                             live_existing = self.chain.media_exists(mediainfo=mediainfo)
+                            # For season-only RSS entries, derive concrete target
+                            # episodes from recognized TMDB season metadata. A
+                            # non-empty target makes MoviePilot pause qBittorrent,
+                            # inspect files, set priority=0/1, and resume safely.
+                            if mediainfo.type == MediaType.TV and not (meta.episode_list or []):
+                                season = meta.begin_season
+                                known_season_episodes = set(
+                                    (getattr(mediainfo, 'seasons', None) or {}).get(season, []) or []
+                                )
+                                if not known_season_episodes:
+                                    logger.warning(
+                                        f"RSS_SMART_DEFER {mediainfo.title_year} {meta.season}: "
+                                        "无法取得该季明确集数，禁止整季下载"
+                                    )
+                                    continue
+                                meta.episode_list = sorted(known_season_episodes)
                             reason, selected = guard.decide(mediainfo, meta, live_existing)
                             if reason:
                                 logger.info(f"RSS_DEDUPE_SKIP {mediainfo.title_year} {meta.season_episode}: {reason}")
-                                continue
-                            # Safety stop: season packs must not be submitted as a
-                            # full-season download until file-level qBittorrent
-                            # selection is wired into this independent plugin.
-                            if mediainfo.type == MediaType.TV and not (meta.episode_list or []):
-                                logger.warning(
-                                    f"RSS_SMART_DEFER {mediainfo.title_year} {meta.season}: "
-                                    "整季资源未接入文件级选择，禁止直接下载"
-                                )
                                 continue
                             if selected:
                                 logger.info(f"RSS_DEDUPE_PARTIAL {mediainfo.title_year}: 仅下载缺失集 {sorted(selected)}")
