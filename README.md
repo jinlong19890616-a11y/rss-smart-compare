@@ -8,8 +8,14 @@
 - `rsssubscribe_smart/smart_guard.py`：库集数、已下载任务、已整理文件的判重逻辑
 - `rsssubscribe_smart/dryrun_compare.py`：离线 dry-run，不访问网络、不连接 qBittorrent、不下载
 - `rsssubscribe_smart/file_selection_plan.py`：根据种子文件列表生成 priority 选择计划，不实际操作 qBittorrent
-- `rsssubscribe_smart/qbittorrent_adapter.py`：qBittorrent 三步边界适配器；目前只由 FakeQbit 测试，不连接真实服务器
+- `rsssubscribe_smart/qbittorrent_adapter.py`：qBittorrent 三步边界适配器；目前由 FakeQbit 测试
+- `plugins.v2/rsssubscribesmart/`：MoviePilot V2 市场安装目录
 - `tests/`：现有 Guard、dry-run、文件选择计划和模拟 qBittorrent 测试
+
+## MoviePilot V2 整季包流程
+
+插件版本 0.2.0 起，识别到季号但没有明确集号的电视剧资源时，会从已识别的 TMDB 季集数生成目标集集合，并传入 MoviePilot 原生下载链。MoviePilot 会先暂停 qBittorrent 任务、读取文件列表、按文件名识别集数，将媒体库已有集设为 `priority=0`、缺失集设为 `priority=1`，然后恢复任务。无法取得明确季集数，或文件无法安全识别时，插件继续延后，不提交整季下载。
+
 
 ## dry-run
 

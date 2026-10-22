@@ -768,10 +768,13 @@ class RssSubscribeSmart(_PluginBase):
                                 continue
                             if selected:
                                 logger.info(f"RSS_DEDUPE_PARTIAL {mediainfo.title_year}: 仅下载缺失集 {sorted(selected)}")
+                            download_episodes = selected
+                            if download_episodes is None and mediainfo.type == MediaType.TV:
+                                download_episodes = set(meta.episode_list or [])
                             result = downloadchain.download_single(
                                 context=Context(meta_info=meta, media_info=mediainfo,
                                                 torrent_info=torrentinfo),
-                                episodes=selected,
+                                episodes=download_episodes,
                                 save_path=(self._save_path or "").strip() or None,
                                 username="RSS订阅"
                             )
