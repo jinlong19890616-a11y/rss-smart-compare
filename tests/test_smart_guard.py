@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace as N
 import sys
 sys.path.insert(0, str(Path(__file__).parents[1] / 'rsssubscribe_smart'))
-from smart_guard import Guard, explicit_pairs, selected_pairs, rule_matches, has_chinese_subtitle
+from smart_guard import Guard, explicit_pairs, selected_pairs, rule_matches, has_chinese_subtitle, blocks
 
 class Tests(unittest.TestCase):
     def setUp(self):
@@ -22,6 +22,12 @@ class Tests(unittest.TestCase):
     def test_selected_pack_only_missing(self):
         files=[{'name':f'Show.S01E{i:02}.mkv','priority':1} for i in range(1,6)]
         self.assertEqual(selected_pairs(files), {(1,1),(1,2),(1,3),(1,4),(1,5)})
+    def test_size_upgrade_guard(self):
+        self.assertTrue(blocks(2160, 2160, 3 * 1024**3, 16 * 1024**3))
+        self.assertFalse(blocks(2160, 2160, 16 * 1024**3, 3 * 1024**3))
+        self.assertTrue(blocks(1080, 2160, 15 * 1024**3, 3 * 1024**3))
+        self.assertFalse(blocks(2160, 1080, 3 * 1024**3, 15 * 1024**3))
+
     def test_media_rules(self):
         self.assertEqual(rule_matches('Show.S01E01.1080p.WEB-DL', 1080, 'any'), (True, ''))
         self.assertFalse(rule_matches('Show.S01E01.720p.WEB-DL', 1080, 'any')[0])

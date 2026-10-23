@@ -21,10 +21,23 @@ def resolution(text):
     return max(values, default=0)
 
 
-def blocks(candidate, existing):
-    # Only the explicitly requested 1080p -> 2160p upgrade is automatic.
-    # Unknown quality is not evidence that a new download is an upgrade.
-    return not (candidate == 2160 and existing == 1080)
+def blocks(candidate, existing, candidate_size=0, existing_size=0):
+    """Return True when an existing copy blocks this candidate.
+
+    Resolution remains the primary quality signal.  At equal resolution a
+    substantially larger release is treated as a possible remux/bitrate
+    upgrade; a smaller release never replaces a larger one.  Size is only a
+    secondary signal and is ignored when either side is unknown.
+    """
+    if not candidate or not existing:
+        return True
+    if candidate > existing:
+        return False
+    if candidate < existing:
+        return True
+    if candidate_size > 0 and existing_size > 0:
+        return candidate_size < existing_size * 1.25
+    return True
 
 
 def has_chinese_subtitle(text):
@@ -134,6 +147,7 @@ class Guard:
             raise RuntimeError('跨季包或季号不明确，需人工确认后下载')
         candidate = resolution(getattr(meta, 'org_string', '') or getattr(meta, 'orginal_title', '') or '')
         candidate = getattr(meta, '_rss_resolution', candidate)
+        candidate_size = int(getattr(meta, '_rss_size', 0) or 0)
         covered = set()
         verified_low = set()
         verified_low_movie = False
@@ -151,14 +165,15 @@ class Guard:
                 except OSError as exc:
                     raise RuntimeError('无法核实整理目标文件，延后处理') from exc
                 old_resolution = resolution(path.name)
+                old_size = path.stat().st_size
                 if not tv:
-                    if blocks(candidate, old_resolution):
+                    if blocks(candidate, old_resolution, candidate_size, old_size):
                         return '已成功整理且目标电影文件仍存在（同级或更高/未知分辨率）', None
                     verified_low_movie = True
                     continue
                 pair = explicit_pairs(path.name)
                 if pair and pair[0] == season:
-                    if blocks(candidate, old_resolution):
+                    if blocks(candidate, old_resolution, candidate_size, path.stat().st_size):
                         covered.add(pair[1])
                     else:
                         verified_low.add(pair[1])
@@ -191,8 +206,9 @@ class Guard:
             if getattr(row, 'downloader', None) and row.downloader != name:
                 continue
             old_resolution = resolution(torrent.get('name') or getattr(row, 'torrent_name', ''))
+            old_size = int(torrent.get('size') or torrent.get('total_size') or 0)
             if not tv:
-                if blocks(candidate, old_resolution):
+                if blocks(candidate, old_resolution, candidate_size, old_size):
                     return '同一电影已有同级或更高/未知分辨率任务', None
                 continue
             files = server.get_files(torrent['hash'])
@@ -209,7 +225,8 @@ class Guard:
                     continue
                 pair = explicit_pairs(Path(file['name']).name)
                 file_resolution = resolution(Path(file['name']).name) or old_resolution
-                if pair and pair[0] == season and blocks(candidate, file_resolution):
+                file_size = int(file.get('size') or file.get('file_size') or 0)
+                if pair and pair[0] == season and blocks(candidate, file_resolution, candidate_size, file_size or old_size):
                     covered.add(pair[1])
         pending = json.loads(self.pending.read_text()) if self.pending.exists() else []
         now = time.time()
@@ -217,7 +234,7 @@ class Guard:
         for p in pending:
             if tuple(p['identity']) != ident:
                 continue
-            if not blocks(candidate, p.get('resolution', 0)):
+            if not blocks(candidate, p.get('resolution', 0), candidate_size, p.get('size', 0)):
                 continue
             if not tv:
                 return '同一电影刚刚提交下载', None
@@ -241,6 +258,7 @@ class Guard:
         entries.append({'identity': identity(media), 'season': getattr(meta, 'begin_season', None),
                         'episodes': sorted(selected or getattr(meta, 'episode_list', None) or []),
                         'resolution': getattr(meta, '_rss_resolution', resolution(getattr(meta, 'org_string', ''))),
+                         'size': int(getattr(meta, '_rss_size', 0) or 0),
                         'hash': hash_value, 'time': now})
         temporary = self.pending.with_suffix('.tmp')
         temporary.write_text(json.dumps(entries, ensure_ascii=False))

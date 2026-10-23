@@ -49,7 +49,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.5.2-no-cooldown"
+    plugin_version = "0.6.0-size-upgrade"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -703,6 +703,7 @@ class RssSubscribeSmart(_PluginBase):
                     # 识别媒体信息
                     meta = MetaInfo(title=title, subtitle=description)
                     meta._rss_resolution = resolution(title)
+                    meta._rss_size = int(float(size or 0))
                     if not meta.name:
                         logger.warn(f"{title} 未识别到有效数据")
                         continue
