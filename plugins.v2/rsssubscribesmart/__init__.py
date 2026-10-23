@@ -49,7 +49,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.4.1-fix-metainfo-range"
+    plugin_version = "0.5.0-download-subscribe"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -288,7 +288,8 @@ class RssSubscribeSmart(_PluginBase):
                                             'label': '动作',
                                             'items': [
                                                 {'title': '订阅', 'value': 'subscribe'},
-                                                {'title': '下载', 'value': 'download'}
+                                                {'title': '下载', 'value': 'download'},
+                                                {'title': '下载并订阅', 'value': 'download_subscribe'}
                                             ]
                                         }
                                     }
@@ -654,7 +655,8 @@ class RssSubscribeSmart(_PluginBase):
             except Exception:
                 logger.error("RSS_FETCH_DEFER 某个RSS读取失败，本轮不择优下载")
                 return
-        if self._action == "download":
+        download_mode = self._action in ("download", "download_subscribe")
+        if download_mode:
             batch.sort(key=lambda item: resolution(item.get("title", "")), reverse=True)
         for url, results in [("本轮汇总（全部RSS）", batch)]:
             # 过滤规则
@@ -674,12 +676,12 @@ class RssSubscribeSmart(_PluginBase):
                         continue
                     seen_fingerprints.add(fingerprint)
                     # 检查是否处理过
-                    if not title or (self._action != "download" and title in [h.get("key") for h in history]):
+                    if not title or (not download_mode and title in [h.get("key") for h in history]):
                         continue
                     # Do not repeatedly resubmit an identical RSS resource every cycle.
                     # This is a per-resource cooldown, not a permanent media ban;
                     # alternative releases remain eligible for media/file checks.
-                    if self._action == "download":
+                    if download_mode:
                         previous = next((h for h in reversed(history) if h.get("key") == title), None)
                         if previous:
                             try:
@@ -745,7 +747,7 @@ class RssSubscribeSmart(_PluginBase):
                         if not result:
                             logger.info(f"{title} {description} 不匹配过滤规则")
                             continue
-                    if self._action != "download":
+                    if not download_mode:
                         # 媒体库已存在的剧集
                         exist_info: Optional[ExistMediaInfo] = self.chain.media_exists(mediainfo=mediainfo)
                         if mediainfo.type == MediaType.TV:
@@ -761,7 +763,7 @@ class RssSubscribeSmart(_PluginBase):
                             logger.info(f'{mediainfo.title_year} 己存在')
                             continue
                     # 下载或订阅
-                    if self._action == "download":
+                    if download_mode:
                         # Shared media-level guard: never delete existing torrents.
                         with exclusive(settings.PLUGIN_DATA_PATH):
                             module = QbittorrentModule()
@@ -818,6 +820,14 @@ class RssSubscribeSmart(_PluginBase):
                                 logger.error(f'{title} 下载失败；不记录媒体占位，允许补下')
                                 continue
                             guard.reserve(mediainfo, meta, result, selected)
+                        if self._action == "download_subscribe" and mediainfo.type == MediaType.TV:
+                            subflag = subscribechain.exists(mediainfo=mediainfo, meta=meta)
+                            if not subflag:
+                                subscribechain.add(title=mediainfo.title, year=mediainfo.year,
+                                                   mtype=mediainfo.type, tmdbid=mediainfo.tmdb_id,
+                                                   season=meta.begin_season, exist_ok=True,
+                                                   username="RSS订阅")
+                                logger.info(f"RSS_DOWNLOAD_SUBSCRIBE {mediainfo.title_year} {meta.season}: 已下载并创建订阅")
                     else:
                         # 检查是否在订阅中
                         subflag = subscribechain.exists(mediainfo=mediainfo, meta=meta)
