@@ -105,6 +105,26 @@ def selected_pairs(files):
     return None if None in pairs else pairs
 
 
+def release_tokens(text):
+    """Extract stable release tokens for a conservative same-torrent check."""
+    value = re.sub(r'(?i)\b(complete|proper|repack|2160p|1080p|720p|web[- .]?dl|blu[- .]?ray|h\.?26[45]|x26[45]|hevc|avc|aac|ddp|dts|hdr|dv|atmos|remux|nf|amzn|dsnp)\b', ' ', text or '')
+    return {x for x in re.findall(r'[a-z0-9]{2,}', value.lower()) if not x.isdigit()}
+
+
+def same_release(candidate_title, torrent_name, season, episode_list=None):
+    """Fail closed when qBittorrent already has the same identifiable release."""
+    c = release_tokens(candidate_title)
+    t = release_tokens(torrent_name)
+    if not c or not t or len(c & t) < 2:
+        return False
+    if season is not None:
+        season_mark = f's{int(season):02d}'
+        if season_mark not in (torrent_name or '').lower().replace(' ', ''):
+            return False
+    overlap = len(c & t) / max(1, min(len(c), len(t)))
+    return overlap >= 0.65
+
+
 @contextlib.contextmanager
 def exclusive(root, timeout=30):
     root = Path(root)
@@ -205,6 +225,16 @@ class Guard:
                 continue
             if getattr(row, 'downloader', None) and row.downloader != name:
                 continue
+            if same_release(getattr(meta, 'org_string', '') or '', torrent.get('name', ''), season, episodes):
+                if not tv:
+                    return '同一资源已在下载任务中', None
+                torrent_episodes = set()
+                for f in (server.get_files(torrent['hash']) or []):
+                    pair = explicit_pairs(Path(f['name']).name)
+                    if pair and pair[0] == season:
+                        torrent_episodes.add(pair[1])
+                if not episodes or not (episodes - torrent_episodes):
+                    return '同一资源已在下载任务中', None
             old_resolution = resolution(torrent.get('name') or getattr(row, 'torrent_name', ''))
             old_size = int(torrent.get('size') or torrent.get('total_size') or 0)
             if not tv:

@@ -49,7 +49,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.6.0-size-upgrade"
+    plugin_version = "0.6.1-same-release-dedupe"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
