@@ -787,7 +787,11 @@ class RssSubscribeSmart(_PluginBase):
                                         "无法取得该季明确集数，禁止整季下载"
                                     )
                                     continue
-                                meta.episode_list = sorted(known_season_episodes)
+                                # MetaInfo.episode_list is a read-only derived
+                                # property. Set its source range instead of assigning
+                                # to the property directly.
+                                meta.begin_episode = min(known_season_episodes)
+                                meta.end_episode = max(known_season_episodes)
                             reason, selected = guard.decide(mediainfo, meta, live_existing)
                             if reason:
                                 logger.info(f"RSS_DEDUPE_SKIP {mediainfo.title_year} {meta.season_episode}: {reason}")
