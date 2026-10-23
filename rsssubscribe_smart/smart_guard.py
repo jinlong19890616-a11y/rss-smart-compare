@@ -28,12 +28,30 @@ def blocks(candidate, existing):
 
 
 def has_chinese_subtitle(text):
-    """Return whether RSS metadata explicitly advertises Chinese subtitles."""
-    text = html.unescape(html.unescape(text or ''))
-    return bool(re.search(
-        r'(?i)(中字|简中|繁中|简繁|中文字幕|中文字幕|中英|简英|繁英|CHS|CHT|GB\b|BIG5\b|中文翻译|国配|国语|粤语|中字内封|内封中字|外挂中字|双语|中日双语|中韩双语|\bChinese(?:\.Sub|[ ._-]*Subtitle)|\bCNSUB\b)',
-        text,
-    ))
+    """Return whether RSS metadata explicitly advertises Chinese subtitles.
+
+    Audio-language markers such as 国语/粤语 are deliberately excluded: they
+    do not prove that a subtitle stream exists.  RSS descriptions often use
+    phrases like ``字幕素材`` or ``简体字幕`` instead of the short ``中字``
+    tag, so those forms are accepted as explicit subtitle evidence.
+    """
+    text = text or ''
+    # Some RSS providers double-escape HTML entities more than once.
+    for _ in range(4):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    patterns = (
+        r'中字|简中|繁中|简繁|中文字幕|中字幕|中英|简英|繁英',
+        r'CHS|CHT|BIG5|(?<![A-Z])GB(?![A-Z])|CNSUB',
+        r'中文翻译|字幕组|字幕素材|字幕翻译|中日双语|中韩双语',
+        r'(?:简体|繁体|简繁体|中文).{0,8}字幕',
+        r'(?:内封|内嵌|外挂|硬字幕|软字幕).{0,8}(?:中字|中文|字幕)',
+        r'(?:中字|中文|字幕).{0,8}(?:内封|内嵌|外挂|硬字幕|软字幕)',
+        r'Chinese(?:\.Sub|[ ._-]*Subtitle)',
+    )
+    return any(re.search(r'(?i)' + pattern, text) for pattern in patterns)
 
 
 def rule_matches(text, minimum_resolution=0, subtitle_mode='any'):

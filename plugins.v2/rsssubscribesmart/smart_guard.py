@@ -7,6 +7,7 @@ import html
 import json
 import re
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 
 VIDEO = {'.mkv', '.mp4', '.avi', '.ts', '.m2ts', '.mov', '.wmv', '.webm', '.mpeg', '.mpg'}
@@ -20,12 +21,41 @@ def resolution(text):
     return max(values, default=0)
 
 
+def blocks(candidate, existing):
+    # Only the explicitly requested 1080p -> 2160p upgrade is automatic.
+    # Unknown quality is not evidence that a new download is an upgrade.
+    return not (candidate == 2160 and existing == 1080)
+
+
 def has_chinese_subtitle(text):
-    text = html.unescape(text or '')
-    return bool(re.search(r'(?i)(中字|简中|繁中|简繁|中文字幕|中英|简英|繁英|CHS|CHT|GB\\b|BIG5\\b|中文翻译|国配|国语|粤语|中字内封|内封中字|外挂中字|双语|中日双语|中韩双语|\\bChinese(?:\\.Sub|[ ._-]*Subtitle)|\\bCNSUB\\b)', text))
+    """Return whether RSS metadata explicitly advertises Chinese subtitles.
+
+    Audio-language markers such as 国语/粤语 are deliberately excluded: they
+    do not prove that a subtitle stream exists.  RSS descriptions often use
+    phrases like ``字幕素材`` or ``简体字幕`` instead of the short ``中字``
+    tag, so those forms are accepted as explicit subtitle evidence.
+    """
+    text = text or ''
+    # Some RSS providers double-escape HTML entities more than once.
+    for _ in range(4):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    patterns = (
+        r'中字|简中|繁中|简繁|中文字幕|中字幕|中英|简英|繁英',
+        r'CHS|CHT|BIG5|(?<![A-Z])GB(?![A-Z])|CNSUB',
+        r'中文翻译|字幕组|字幕素材|字幕翻译|中日双语|中韩双语',
+        r'(?:简体|繁体|简繁体|中文).{0,8}字幕',
+        r'(?:内封|内嵌|外挂|硬字幕|软字幕).{0,8}(?:中字|中文|字幕)',
+        r'(?:中字|中文|字幕).{0,8}(?:内封|内嵌|外挂|硬字幕|软字幕)',
+        r'Chinese(?:\.Sub|[ ._-]*Subtitle)',
+    )
+    return any(re.search(r'(?i)' + pattern, text) for pattern in patterns)
 
 
 def rule_matches(text, minimum_resolution=0, subtitle_mode='any'):
+    """Apply a conservative RSS quality/subtitle rule to visible metadata."""
     current = resolution(text)
     if minimum_resolution and current < int(minimum_resolution):
         return False, f'分辨率 {current or "未知"} 低于要求 {minimum_resolution}'
@@ -35,12 +65,6 @@ def rule_matches(text, minimum_resolution=0, subtitle_mode='any'):
     if subtitle_mode == 'forbidden' and subtitle:
         return False, '标注了中文字幕'
     return True, ''
-
-
-def blocks(candidate, existing):
-    # Only the explicitly requested 1080p -> 2160p upgrade is automatic.
-    # Unknown quality is not evidence that a new download is an upgrade.
-    return not (candidate == 2160 and existing == 1080)
 
 
 def identity(media):

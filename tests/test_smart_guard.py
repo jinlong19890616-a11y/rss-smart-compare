@@ -30,5 +30,8 @@ class Tests(unittest.TestCase):
         self.assertTrue(has_chinese_subtitle('Movie.1080p.CHS'))
         self.assertTrue(has_chinese_subtitle('Movie.1080p.内封中字'))
         self.assertTrue(has_chinese_subtitle('Movie.1080p.&amp;#x4E2D;&amp;#x5B57;'))
+        self.assertTrue(has_chinese_subtitle('字幕素材：简体中文字幕'))
+        self.assertTrue(has_chinese_subtitle('外挂中文软字幕'))
+        self.assertFalse(has_chinese_subtitle('国语 粤语 双音轨'))
 
 if __name__=='__main__': unittest.main(verbosity=2)
