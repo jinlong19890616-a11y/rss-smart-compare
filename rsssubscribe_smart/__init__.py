@@ -49,7 +49,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.5.1-subtitle-rules"
+    plugin_version = "0.5.2-no-cooldown"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -678,20 +678,11 @@ class RssSubscribeSmart(_PluginBase):
                     # 检查是否处理过
                     if not title or (not download_mode and title in [h.get("key") for h in history]):
                         continue
-                    # Do not repeatedly resubmit an identical RSS resource every cycle.
-                    # This is a per-resource cooldown, not a permanent media ban;
-                    # alternative releases remain eligible for media/file checks.
-                    if download_mode:
-                        previous = next((h for h in reversed(history) if h.get("key") == title), None)
-                        if previous:
-                            try:
-                                age = (datetime.datetime.now() - datetime.datetime.strptime(
-                                    previous["time"], "%Y-%m-%d %H:%M:%S")).total_seconds()
-                                if 0 <= age < 21600:
-                                    logger.info(f"RSS_DEDUPE_COOLDOWN {title}: 同一资源6小时内已提交，暂不重试")
-                                    continue
-                            except (KeyError, ValueError, TypeError):
-                                pass
+                    # Do not use a time-based resource cooldown here.  Current
+                    # qBittorrent tasks, download history, library state, and the
+                    # guarded pending reservations already prevent duplicate work;
+                    # a six-hour title cooldown can incorrectly suppress a retry or
+                    # a better release.
                     # 检查规则
                     if self._include and not re.search(r"%s" % self._include,
                                                        f"{title} {description}", re.IGNORECASE):
