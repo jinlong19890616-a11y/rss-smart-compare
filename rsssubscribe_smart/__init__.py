@@ -17,6 +17,7 @@ from app.db import SessionFactory
 from app.db.models.transferhistory import TransferHistory
 from app.modules.qbittorrent import QbittorrentModule
 from .smart_guard import Guard, exclusive, resolution, rule_matches
+from .subscription_flow import ensure_subscription
 from app.core.config import settings
 from app.core.context import MediaInfo, TorrentInfo, Context
 from app.core.metainfo import MetaInfo
@@ -49,7 +50,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.6.1-same-release-dedupe"
+    plugin_version = "0.6.2"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -756,6 +757,11 @@ class RssSubscribeSmart(_PluginBase):
                             continue
                     # 下载或订阅
                     if download_mode:
+                        # Subscription must not depend on a successful download or
+                        # a dedupe decision: an existing task may still leave later
+                        # episodes missing. Failures remain retryable next cycle.
+                        if self._action == "download_subscribe" and mediainfo.type == MediaType.TV:
+                            ensure_subscription(subscribechain, mediainfo, meta, logger)
                         # Shared media-level guard: never delete existing torrents.
                         with exclusive(settings.PLUGIN_DATA_PATH):
                             module = QbittorrentModule()
@@ -812,14 +818,6 @@ class RssSubscribeSmart(_PluginBase):
                                 logger.error(f'{title} 下载失败；不记录媒体占位，允许补下')
                                 continue
                             guard.reserve(mediainfo, meta, result, selected)
-                        if self._action == "download_subscribe" and mediainfo.type == MediaType.TV:
-                            subflag = subscribechain.exists(mediainfo=mediainfo, meta=meta)
-                            if not subflag:
-                                subscribechain.add(title=mediainfo.title, year=mediainfo.year,
-                                                   mtype=mediainfo.type, tmdbid=mediainfo.tmdb_id,
-                                                   season=meta.begin_season, exist_ok=True,
-                                                   username="RSS订阅")
-                                logger.info(f"RSS_DOWNLOAD_SUBSCRIBE {mediainfo.title_year} {meta.season}: 已下载并创建订阅")
                     else:
                         # 检查是否在订阅中
                         subflag = subscribechain.exists(mediainfo=mediainfo, meta=meta)

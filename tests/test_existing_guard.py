@@ -126,4 +126,165 @@ class Tests(unittest.TestCase):
         self.meta._rss_resolution=2160
         self.assertTrue(g.decide(self.media,self.meta,None)[0])
 
+    def quality_meta(self, episodes, size=100, resolution=2160):
+        self.meta.episode_list = episodes
+        mark = f'S01E{episodes[0]:02}' if len(episodes) == 1 else 'S01.Complete'
+        self.meta.org_string = f'Cycle.Love.{mark}.{resolution}p.WEB-DL'
+        self.meta._rss_resolution = resolution
+        self.meta._rss_size = size
+
+    def quality_task(self, resolution=2160):
+        tasks = self.task()
+        tasks[0].update(name=f'Cycle.Love.S01.Complete.{resolution}p.WEB-DL', size=1000)
+        return tasks
+
+    def quality_files(self, resolution=2160):
+        return [{'name': f'Cycle.Love.S01E{ep:02}.{resolution}p.mkv',
+                 'priority': 1, 'size': 10} for ep in (2, 3)]
+
+    def test_pack_total_does_not_upgrade_live_episode_files(self):
+        self.quality_meta([2, 3])
+        g = self.guard(self.quality_task(), self.quality_files(), self.row())
+        self.assertTrue(g.decide(self.media, self.meta, None)[0])
+
+    def test_unknown_pack_total_does_not_upgrade_live_episode_files(self):
+        self.quality_meta([])
+        g = self.guard(self.quality_task(), self.quality_files(), self.row())
+        with self.assertRaises(RuntimeError):
+            g.decide(self.media, self.meta, None)
+
+    def test_pack_total_does_not_upgrade_transferred_episode_files(self):
+        self.quality_meta([2, 3])
+        p = self.root / 'Cycle.Love.S01E02.2160p.mkv'
+        p.write_bytes(b'0123456789')
+        g = self.guard()
+        g.transferred = lambda ident, season: [N(dest=str(p))]
+        self.assertEqual(g.decide(self.media, self.meta, None), (None, {3}))
+
+    def test_pack_selected_subset_does_not_turn_total_into_episode_size(self):
+        self.quality_meta([2])
+        self.meta.org_string = 'Cycle.Love.S01.Complete.2160p.WEB-DL'
+        g = self.guard(self.quality_task(), self.quality_files(), self.row())
+        self.assertTrue(g.decide(self.media, self.meta, None)[0])
+
+    def test_same_title_disabled_episode_not_covered(self):
+        self.quality_meta([2, 3])
+        files = self.quality_files()
+        files[1]['priority'] = 0
+        g = self.guard(self.quality_task(), files, self.row())
+        self.assertEqual(g.decide(self.media, self.meta, None), (None, {3}))
+
+    def test_same_title_all_disabled_does_not_cover(self):
+        self.quality_meta([2, 3])
+        files = self.quality_files()
+        for f in files:
+            f['priority'] = 0
+        g = self.guard(self.quality_task(), files, self.row())
+        self.assertEqual(g.decide(self.media, self.meta, None), (None, None))
+
+    def test_selected_archive_still_defers_unknown_coverage(self):
+        self.quality_meta([2, 3])
+        files = [{'name': 'Cycle.Love.S01.Complete.rar', 'priority': 1}]
+        g = self.guard(self.quality_task(), files, self.row())
+        with self.assertRaises(RuntimeError):
+            g.decide(self.media, self.meta, None)
+
+    def test_same_title_different_resolution_allows_upgrade(self):
+        self.quality_meta([2, 3])
+        g = self.guard(self.quality_task(1080), self.quality_files(1080), self.row())
+        self.assertEqual(g.decide(self.media, self.meta, None), (None, None))
+
+    def test_same_title_single_episode_size_upgrade_uses_file_not_pack_total(self):
+        self.quality_meta([2])
+        g = self.guard(self.quality_task(), self.quality_files(), self.row())
+        self.assertEqual(g.decide(self.media, self.meta, None), (None, None))
+
+    def test_missing_file_size_does_not_fall_back_to_torrent_total(self):
+        self.quality_meta([2])
+        files = self.quality_files()
+        for f in files:
+            del f['size']
+        tasks = self.quality_task()
+        tasks[0]['size'] = 1
+        g = self.guard(tasks, files, self.row())
+        self.assertTrue(g.decide(self.media, self.meta, None)[0])
+
+    def test_pack_pending_total_is_never_episode_size(self):
+        self.quality_meta([2, 3], size=10)
+        g = self.guard()
+        g.reserve(self.media, self.meta, 'abc', selected={2})
+        self.quality_meta([2], size=100)
+        self.assertTrue(g.decide(self.media, self.meta, None)[0])
+
+    def test_single_episode_pending_size_upgrade(self):
+        self.quality_meta([2], size=10)
+        g = self.guard()
+        g.reserve(self.media, self.meta, 'abc')
+        self.meta._rss_size = 100
+        self.assertEqual(g.decide(self.media, self.meta, None), (None, None))
+
+    def test_legacy_pending_total_not_used_for_episode_size(self):
+        import json
+        self.quality_meta([2], size=10)
+        g = self.guard()
+        g.reserve(self.media, self.meta, 'abc')
+        entries = json.loads(g.pending.read_text())
+        del entries[0]['size_episode']
+        g.pending.write_text(json.dumps(entries))
+        self.meta._rss_size = 100
+        self.assertTrue(g.decide(self.media, self.meta, None)[0])
+
+    def test_same_title_movie_different_quality_not_fuzzy_blocked(self):
+        self.quality_meta([2], size=2000)
+        self.media.type.value = '电影'
+        row = self.row()
+        row.type = '电影'
+        g = self.guard(self.quality_task(1080), [], row)
+        self.assertEqual(g.decide(self.media, self.meta, None), (None, None))
+
+    def test_smaller_2160_episode_does_not_replace_larger_1080(self):
+        self.quality_meta([2], size=5)
+        g = self.guard(self.quality_task(1080), self.quality_files(1080), self.row())
+        self.assertTrue(g.decide(self.media, self.meta, None)[0])
+
+    def test_resolution_upgrade_not_broadened_in_guard(self):
+        for old, new in ((720, 1080), (720, 2160), (2160, 4320)):
+            with self.subTest(old=old, new=new):
+                self.quality_meta([2], resolution=new)
+                g = self.guard(self.quality_task(old), self.quality_files(old), self.row())
+                self.assertTrue(g.decide(self.media, self.meta, None)[0])
+
+    def test_movie_low_copy_does_not_override_existing_high_copy(self):
+        self.media.type.value = '电影'
+        self.quality_meta([2], size=100)
+        low = self.root / 'Movie.1080p.mkv'
+        high = self.root / 'Movie.2160p.mkv'
+        low.write_bytes(b'0123456789')
+        high.write_bytes(b'x' * 200)
+        for paths in ((low, high), (high, low)):
+            with self.subTest(paths=paths):
+                g = self.guard()
+                g.transferred = lambda ident, season: [N(dest=str(p)) for p in paths]
+                self.assertTrue(g.decide(self.media, self.meta, N())[0])
+
+    def test_episode_low_copy_does_not_override_existing_high_copy(self):
+        self.quality_meta([2], size=100)
+        low = self.root / 'Show.S01E02.1080p.mkv'
+        high = self.root / 'Show.S01E02.2160p.mkv'
+        low.write_bytes(b'0123456789')
+        high.write_bytes(b'x' * 200)
+        for paths in ((low, high), (high, low)):
+            with self.subTest(paths=paths):
+                g = self.guard()
+                g.transferred = lambda ident, season: [N(dest=str(p)) for p in paths]
+                self.assertTrue(g.decide(self.media, self.meta, N(seasons={1:[2]}))[0])
+
+    def test_strm_transfer_is_not_quality_evidence(self):
+        self.quality_meta([2])
+        p = self.root / 'Cycle.Love.S01E02.2160p.strm'
+        p.write_bytes(b'https://example.invalid/video')
+        g = self.guard()
+        g.transferred = lambda ident, season: [N(dest=str(p))]
+        self.assertEqual(g.decide(self.media, self.meta, None), (None, None))
+
 if __name__=='__main__': unittest.main(verbosity=2)

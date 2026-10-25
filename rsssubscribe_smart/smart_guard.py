@@ -24,16 +24,18 @@ def resolution(text):
 def blocks(candidate, existing, candidate_size=0, existing_size=0):
     """Return True when an existing copy blocks this candidate.
 
-    Resolution remains the primary quality signal.  At equal resolution a
-    substantially larger release is treated as a possible remux/bitrate
-    upgrade; a smaller release never replaces a larger one.  Size is only a
-    secondary signal and is ignored when either side is unknown.
+    Only the established 1080p -> 2160p resolution upgrade is automatic,
+    and a known smaller candidate is blocked when sizes are comparable.
+    Size is a proxy, not a measurement of bitrate or visual quality.
+    At equal resolution, a substantially larger release may be an upgrade,
+    but callers must supply sizes with matching scope (movie or one episode).
+    Unknown sizes never establish an upgrade.
     """
     if not candidate or not existing:
         return True
-    if candidate > existing:
-        return False
-    if candidate < existing:
+    if candidate != existing:
+        if candidate == 2160 and existing == 1080:
+            return candidate_size > 0 and existing_size > 0 and candidate_size < existing_size
         return True
     if candidate_size > 0 and existing_size > 0:
         return candidate_size < existing_size * 1.25
@@ -95,6 +97,23 @@ def explicit_pairs(text):
     if re.match(r'(?i)(?:[ ._-]*E\d|\s*-\s*(?:E)?\d)', text[m.end():]):
         return None
     return int(m[1]), int(m[2])
+
+
+def rss_size_scope(media, meta):
+    """Return a trustworthy RSS size and its explicit TV episode, if any.
+
+    RSS enclosure sizes describe the entire release, never a selected subset
+    of a pack.  Do not infer per-episode sizes by dividing a pack total.
+    """
+    size = int(getattr(meta, '_rss_size', 0) or 0)
+    if identity(media)[0] == '电影':
+        return size, None
+    title = getattr(meta, 'org_string', '') or getattr(meta, 'orginal_title', '') or ''
+    pair = explicit_pairs(title)
+    episodes = set(getattr(meta, 'episode_list', None) or [])
+    if pair and pair[0] == getattr(meta, 'begin_season', None) and episodes == {pair[1]}:
+        return size, pair
+    return 0, None
 
 
 def selected_pairs(files):
@@ -167,7 +186,7 @@ class Guard:
             raise RuntimeError('跨季包或季号不明确，需人工确认后下载')
         candidate = resolution(getattr(meta, 'org_string', '') or getattr(meta, 'orginal_title', '') or '')
         candidate = getattr(meta, '_rss_resolution', candidate)
-        candidate_size = int(getattr(meta, '_rss_size', 0) or 0)
+        candidate_size, candidate_pair = rss_size_scope(media, meta)
         covered = set()
         verified_low = set()
         verified_low_movie = False
@@ -193,7 +212,8 @@ class Guard:
                     continue
                 pair = explicit_pairs(path.name)
                 if pair and pair[0] == season:
-                    if blocks(candidate, old_resolution, candidate_size, path.stat().st_size):
+                    size = candidate_size if pair == candidate_pair else 0
+                    if blocks(candidate, old_resolution, size, old_size):
                         covered.add(pair[1])
                     else:
                         verified_low.add(pair[1])
@@ -225,16 +245,6 @@ class Guard:
                 continue
             if getattr(row, 'downloader', None) and row.downloader != name:
                 continue
-            if same_release(getattr(meta, 'org_string', '') or '', torrent.get('name', ''), season, episodes):
-                if not tv:
-                    return '同一资源已在下载任务中', None
-                torrent_episodes = set()
-                for f in (server.get_files(torrent['hash']) or []):
-                    pair = explicit_pairs(Path(f['name']).name)
-                    if pair and pair[0] == season:
-                        torrent_episodes.add(pair[1])
-                if not episodes or not (episodes - torrent_episodes):
-                    return '同一资源已在下载任务中', None
             old_resolution = resolution(torrent.get('name') or getattr(row, 'torrent_name', ''))
             old_size = int(torrent.get('size') or torrent.get('total_size') or 0)
             if not tv:
@@ -244,6 +254,10 @@ class Guard:
             files = server.get_files(torrent['hash'])
             if files is None:
                 raise RuntimeError('无法读取同媒体任务文件，延后处理')
+            # Disabled videos provide no coverage, including same-title packs.
+            videos = [f for f in files if Path(f['name']).suffix.lower() in VIDEO]
+            if videos and all(f.get('priority', 1) == 0 for f in videos):
+                continue
             pairs = selected_pairs(files)
             if pairs is None:
                 row_seasons = {int(x) for x in re.findall(r'S(\d+)', row.seasons or '')}
@@ -256,7 +270,8 @@ class Guard:
                 pair = explicit_pairs(Path(file['name']).name)
                 file_resolution = resolution(Path(file['name']).name) or old_resolution
                 file_size = int(file.get('size') or file.get('file_size') or 0)
-                if pair and pair[0] == season and blocks(candidate, file_resolution, candidate_size, file_size or old_size):
+                size = candidate_size if pair == candidate_pair else 0
+                if pair and pair[0] == season and blocks(candidate, file_resolution, size, file_size):
                     covered.add(pair[1])
         pending = json.loads(self.pending.read_text()) if self.pending.exists() else []
         now = time.time()
@@ -264,7 +279,9 @@ class Guard:
         for p in pending:
             if tuple(p['identity']) != ident:
                 continue
-            if not blocks(candidate, p.get('resolution', 0), candidate_size, p.get('size', 0)):
+            # Legacy pending rows and pack totals have no per-episode scope.
+            size = candidate_size if not tv or tuple(p.get('size_episode') or []) == candidate_pair else 0
+            if not blocks(candidate, p.get('resolution', 0), size, p.get('size', 0)):
                 continue
             if not tv:
                 return '同一电影刚刚提交下载', None
@@ -285,10 +302,11 @@ class Guard:
         now = time.time()
         entries = json.loads(self.pending.read_text()) if self.pending.exists() else []
         entries = [p for p in entries if now - p['time'] < 120]
+        size, size_episode = rss_size_scope(media, meta)
         entries.append({'identity': identity(media), 'season': getattr(meta, 'begin_season', None),
                         'episodes': sorted(selected or getattr(meta, 'episode_list', None) or []),
                         'resolution': getattr(meta, '_rss_resolution', resolution(getattr(meta, 'org_string', ''))),
-                         'size': int(getattr(meta, '_rss_size', 0) or 0),
+                         'size': size, 'size_episode': size_episode,
                         'hash': hash_value, 'time': now})
         temporary = self.pending.with_suffix('.tmp')
         temporary.write_text(json.dumps(entries, ensure_ascii=False))

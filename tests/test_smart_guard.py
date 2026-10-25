@@ -30,7 +30,11 @@ class Tests(unittest.TestCase):
         self.assertTrue(blocks(2160, 2160, 3 * 1024**3, 16 * 1024**3))
         self.assertFalse(blocks(2160, 2160, 16 * 1024**3, 3 * 1024**3))
         self.assertTrue(blocks(1080, 2160, 15 * 1024**3, 3 * 1024**3))
-        self.assertFalse(blocks(2160, 1080, 3 * 1024**3, 15 * 1024**3))
+        self.assertTrue(blocks(2160, 1080, 3 * 1024**3, 15 * 1024**3))
+        self.assertFalse(blocks(2160, 1080, 15 * 1024**3, 3 * 1024**3))
+        self.assertFalse(blocks(2160, 1080))
+        for candidate, existing in ((1080, 720), (2160, 720), (4320, 2160)):
+            self.assertTrue(blocks(candidate, existing))
 
     def test_media_rules(self):
         self.assertEqual(rule_matches('Show.S01E01.1080p.WEB-DL', 1080, 'any'), (True, ''))
