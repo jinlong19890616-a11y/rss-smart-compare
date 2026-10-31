@@ -18,6 +18,7 @@ from app.db.models.transferhistory import TransferHistory
 from app.modules.qbittorrent import QbittorrentModule
 from .smart_guard import Guard, exclusive, resolution, rule_matches
 from .subscription_flow import ensure_subscription
+from .identity import identity_title_candidates as shared_identity_title_candidates
 from app.core.config import settings
 from app.core.context import MediaInfo, TorrentInfo, Context
 from app.core.metainfo import MetaInfo
@@ -28,6 +29,40 @@ from app.schemas import ExistMediaInfo
 from app.schemas.types import SystemConfigKey, MediaType
 
 lock = Lock()
+
+
+def _has_cjk(text: str) -> bool:
+    return bool(re.search(r'[\\u3400-\\u9fff]', text or ''))
+
+
+def identity_title_candidates(title: str, description: str = '') -> List[str]:
+    """Return conservative alternate identity titles without changing download metadata."""
+    title = str(title or '').strip()
+    description = str(description or '').strip()
+    candidates = [title]
+    # A site may put the localized title in [..] or 【..】 while the release
+    # name remains English. Only accept bracket content containing CJK.
+    for value in re.findall(r'[\\[【]([^\\]】]+)[\\]】]', title):
+        value = re.sub(r'\\s+', ' ', value).strip()
+        if _has_cjk(value):
+            candidates.append(value)
+    # Prefer explicit site fields; do not treat arbitrary synopsis prose as a title.
+    for pattern in (r'(?:片名|标题|名称|中文名)\\s*[:：]\\s*([^|\\n;,；，]+)',
+                    r'^\\s*([^|\\n]+?)\\s*[|｜]\\s*(?:类型|类别|年份|Year)\\s*[:：]'):
+        for value in re.findall(pattern, description, flags=re.IGNORECASE):
+            value = re.sub(r'\\s+', ' ', value).strip(' []【】')
+            if _has_cjk(value):
+                candidates.append(value)
+    # Common PT description form: "中文片名 | 类型：...".
+    first = re.split(r'[|｜\\n]', description, maxsplit=1)[0].strip(' []【】')
+    if _has_cjk(first) and 1 < len(first) <= 80 and not re.search(r'(简介|剧情|类型|大小|标签)\\s*[:：]', first):
+        candidates.append(first)
+    result = []
+    for value in candidates:
+        value = re.sub(r'\\s+', ' ', value).strip()
+        if value and value not in result:
+            result.append(value)
+    return result
 
 
 def verified_transfer_candidates(ident, season):
@@ -50,7 +85,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.7.0-memory-cache"
+    plugin_version = "0.8.0-identity-fallback"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -740,8 +775,19 @@ class RssSubscribeSmart(_PluginBase):
                     if not meta.name:
                         logger.warn(f"{title} 未识别到有效数据")
                         continue
-                    media_key = (meta.name, getattr(meta, 'year', None), getattr(meta, 'type', None).value if getattr(meta, 'type', None) else None)
-                    mediainfo: MediaInfo = recognize_cached(meta, media_key)
+                    mediainfo = None
+                    identity_title = title
+                    for candidate_title in shared_identity_title_candidates(title, description):
+                        identity_meta = MetaInfo(title=candidate_title, subtitle=description)
+                        identity_key = (candidate_title, getattr(identity_meta, 'year', None),
+                                        getattr(identity_meta, 'type', None).value if getattr(identity_meta, 'type', None) else None)
+                        candidate_media = recognize_cached(identity_meta, identity_key)
+                        if candidate_media:
+                            mediainfo = candidate_media
+                            identity_title = candidate_title
+                            if candidate_title != title:
+                                logger.info(f"RSS_IDENTITY_FALLBACK 原始标题={title} 识别标题={candidate_title}")
+                            break
                     if not mediainfo:
                         logger.warn(f'RSS_IDENTITY_DEFER {title}: 未识别到媒体信息')
                         continue
