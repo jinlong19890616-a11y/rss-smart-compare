@@ -67,7 +67,10 @@ def identity_title_candidates(title: str, description: str = '') -> List[str]:
 
 def verified_transfer_candidates(ident, season):
     with SessionFactory() as db:
-        db.connection().exec_driver_sql("SET TRANSACTION READ ONLY")
+        # MoviePilot may use SQLite (local) or PostgreSQL (external).
+        # SET TRANSACTION is PostgreSQL-only; SQLite is already safe for this read.
+        if db.bind.dialect.name == "postgresql":
+            db.connection().exec_driver_sql("SET TRANSACTION READ ONLY")
         query = db.query(TransferHistory).filter(
             TransferHistory.type == ident[0], TransferHistory.tmdbid == ident[1],
             TransferHistory.status.is_(True))
