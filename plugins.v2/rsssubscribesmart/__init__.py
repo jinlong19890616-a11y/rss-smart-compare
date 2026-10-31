@@ -647,10 +647,13 @@ class RssSubscribeSmart(_PluginBase):
         media_cache = {}
         existing_cache = {}
         subscription_cache = {}
+        cache_hits = {'media': 0, 'library': 0, 'subscription': 0}
 
         def recognize_cached(meta, key):
             if key not in media_cache:
                 media_cache[key] = self.chain.recognize_media(meta=meta)
+            else:
+                cache_hits['media'] += 1
             return media_cache[key]
 
         def media_exists_cached(mediainfo):
@@ -658,12 +661,16 @@ class RssSubscribeSmart(_PluginBase):
                    getattr(mediainfo, 'tmdb_id', None), getattr(mediainfo, 'year', None))
             if key not in existing_cache:
                 existing_cache[key] = self.chain.media_exists(mediainfo=mediainfo)
+            else:
+                cache_hits['library'] += 1
             return existing_cache[key]
 
         def subscription_exists_cached(mediainfo, meta):
             key = (getattr(mediainfo, 'tmdb_id', None), getattr(meta, 'begin_season', None))
             if key not in subscription_cache:
                 subscription_cache[key] = subscribechain.exists(mediainfo=mediainfo, meta=meta)
+            else:
+                cache_hits['subscription'] += 1
             return subscription_cache[key]
 
         # Collect all feeds before selecting any resource; higher resolution first.
@@ -873,6 +880,12 @@ class RssSubscribeSmart(_PluginBase):
                 except Exception as err:
                     logger.error(f'RSS_ITEM_DEFER {title if "title" in locals() else "<unknown>"}: {str(err)}')
             logger.info(f"RSS {url} 刷新完成")
+        logger.info(
+            f"RSS_CACHE_SUMMARY media_hits={cache_hits['media']} "
+            f"library_hits={cache_hits['library']} subscription_hits={cache_hits['subscription']} "
+            f"media_keys={len(media_cache)} library_keys={len(existing_cache)} "
+            f"subscription_keys={len(subscription_cache)}"
+        )
         # 保存历史记录
         self.save_data('history', history)
         # 缓存只清理一次
