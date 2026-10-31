@@ -50,7 +50,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.6.2"
+    plugin_version = "0.7.0-memory-cache"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -641,6 +641,31 @@ class RssSubscribeSmart(_PluginBase):
             history: List[dict] = self.get_data('history') or []
         downloadchain = DownloadChain()
         subscribechain = SubscribeChain()
+        # Process-local caches: they live for this RSS round only and are
+        # intentionally discarded on restart so live qBittorrent/Emby state is
+        # not treated as permanent truth.
+        media_cache = {}
+        existing_cache = {}
+        subscription_cache = {}
+
+        def recognize_cached(meta, key):
+            if key not in media_cache:
+                media_cache[key] = self.chain.recognize_media(meta=meta)
+            return media_cache[key]
+
+        def media_exists_cached(mediainfo):
+            key = (getattr(mediainfo, 'type', None).value if getattr(mediainfo, 'type', None) else None,
+                   getattr(mediainfo, 'tmdb_id', None), getattr(mediainfo, 'year', None))
+            if key not in existing_cache:
+                existing_cache[key] = self.chain.media_exists(mediainfo=mediainfo)
+            return existing_cache[key]
+
+        def subscription_exists_cached(mediainfo, meta):
+            key = (getattr(mediainfo, 'tmdb_id', None), getattr(meta, 'begin_season', None))
+            if key not in subscription_cache:
+                subscription_cache[key] = subscribechain.exists(mediainfo=mediainfo, meta=meta)
+            return subscription_cache[key]
+
         # Collect all feeds before selecting any resource; higher resolution first.
         batch = []
         seen_fingerprints = set()
@@ -708,7 +733,8 @@ class RssSubscribeSmart(_PluginBase):
                     if not meta.name:
                         logger.warn(f"{title} 未识别到有效数据")
                         continue
-                    mediainfo: MediaInfo = self.chain.recognize_media(meta=meta)
+                    media_key = (meta.name, getattr(meta, 'year', None), getattr(meta, 'type', None).value if getattr(meta, 'type', None) else None)
+                    mediainfo: MediaInfo = recognize_cached(meta, media_key)
                     if not mediainfo:
                         logger.warn(f'RSS_IDENTITY_DEFER {title}: 未识别到媒体信息')
                         continue
@@ -742,7 +768,7 @@ class RssSubscribeSmart(_PluginBase):
                             continue
                     if not download_mode:
                         # 媒体库已存在的剧集
-                        exist_info: Optional[ExistMediaInfo] = self.chain.media_exists(mediainfo=mediainfo)
+                        exist_info: Optional[ExistMediaInfo] = media_exists_cached(mediainfo)
                         if mediainfo.type == MediaType.TV:
                             if exist_info:
                                 exist_season = exist_info.seasons
@@ -770,7 +796,7 @@ class RssSubscribeSmart(_PluginBase):
                             guard = Guard(settings.PLUGIN_DATA_PATH, module,
                                           DownloadHistoryOper(), logger,
                                           transferred=verified_transfer_candidates)
-                            live_existing = self.chain.media_exists(mediainfo=mediainfo)
+                            live_existing = media_exists_cached(mediainfo)
                             # For season-only RSS entries, derive the concrete target
                             # episodes from recognized TMDB season metadata. Passing a
                             # non-empty set into MoviePilot's download chain makes it
@@ -820,7 +846,7 @@ class RssSubscribeSmart(_PluginBase):
                             guard.reserve(mediainfo, meta, result, selected)
                     else:
                         # 检查是否在订阅中
-                        subflag = subscribechain.exists(mediainfo=mediainfo, meta=meta)
+                        subflag = subscription_exists_cached(mediainfo, meta)
                         if subflag:
                             logger.info(f'{mediainfo.title_year} {meta.season} 正在订阅中')
                             continue
