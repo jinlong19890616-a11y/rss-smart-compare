@@ -685,6 +685,9 @@ class RssSubscribeSmart(_PluginBase):
         media_cache = {}
         existing_cache = {}
         subscription_cache = {}
+        # One successful movie submission per media identity in a single RSS round.
+        # TV keeps episode-level behavior so separate missing episodes are not lost.
+        submitted_movie_keys = set()
         cache_hits = {'media': 0, 'library': 0, 'subscription': 0}
 
         def recognize_cached(meta, key):
@@ -839,6 +842,14 @@ class RssSubscribeSmart(_PluginBase):
                             continue
                     # 下载或订阅
                     if download_mode:
+                        # A movie can appear in several RSS feeds/releases in one
+                        # batch. Once one submission succeeds, defer later releases;
+                        # Guard still decides quality across prior/live state.
+                        if mediainfo.type == MediaType.MOVIE:
+                            movie_key = (getattr(mediainfo, 'tmdb_id', None), getattr(mediainfo, 'year', None))
+                            if movie_key in submitted_movie_keys:
+                                logger.info(f"RSS_ROUND_MOVIE_DEDUPE {mediainfo.title_year}: 本轮已提交其他版本")
+                                continue
                         # Subscription must not depend on a successful download or
                         # a dedupe decision: an existing task may still leave later
                         # episodes missing. Failures remain retryable next cycle.
@@ -900,6 +911,8 @@ class RssSubscribeSmart(_PluginBase):
                                 logger.error(f'{title} 下载失败；不记录媒体占位，允许补下')
                                 continue
                             guard.reserve(mediainfo, meta, result, selected)
+                            if mediainfo.type == MediaType.MOVIE:
+                                submitted_movie_keys.add(movie_key)
                     else:
                         # 检查是否在订阅中
                         subflag = subscription_exists_cached(mediainfo, meta)
