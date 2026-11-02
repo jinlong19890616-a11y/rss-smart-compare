@@ -190,6 +190,9 @@ class Guard:
         covered = set()
         verified_low = set()
         verified_low_movie = False
+        # Hard cap for movie versions: at most two independently identified
+        # transferred/live/pending versions for the same media identity.
+        movie_versions = set()
         library_episodes = set((getattr(existing, 'seasons', None) or {}).get(season, []) or []) if tv and existing else set()
         # Completed transfers survive torrent removal and library-index delays.
         # Historical success alone is insufficient: the destination must still exist.
@@ -206,6 +209,7 @@ class Guard:
                 old_resolution = resolution(path.name)
                 old_size = path.stat().st_size
                 if not tv:
+                    movie_versions.add((old_resolution, old_size))
                     if blocks(candidate, old_resolution, candidate_size, old_size):
                         return '已成功整理且目标电影文件仍存在（同级或更高/未知分辨率）', None
                     verified_low_movie = True
@@ -248,6 +252,7 @@ class Guard:
             old_resolution = resolution(torrent.get('name') or getattr(row, 'torrent_name', ''))
             old_size = int(torrent.get('size') or torrent.get('total_size') or 0)
             if not tv:
+                movie_versions.add((old_resolution, old_size))
                 if blocks(candidate, old_resolution, candidate_size, old_size):
                     return '同一电影已有同级或更高/未知分辨率任务', None
                 continue
@@ -274,6 +279,8 @@ class Guard:
                 if pair and pair[0] == season and blocks(candidate, file_resolution, size, file_size):
                     covered.add(pair[1])
         pending = json.loads(self.pending.read_text()) if self.pending.exists() else []
+        if not tv and len(movie_versions) >= 2:
+            return '同一电影已有两个版本，达到版本上限', None
         now = time.time()
         pending = [p for p in pending if now - p['time'] < 120]
         for p in pending:
@@ -284,6 +291,9 @@ class Guard:
             if not blocks(candidate, p.get('resolution', 0), size, p.get('size', 0)):
                 continue
             if not tv:
+                movie_versions.add((p.get('resolution', 0), p.get('size', 0)))
+                if len(movie_versions) >= 2:
+                    return '同一电影已有两个版本，达到版本上限', None
                 return '同一电影刚刚提交下载', None
             if p['season'] == season:
                 if not p['episodes'] or not episodes:
