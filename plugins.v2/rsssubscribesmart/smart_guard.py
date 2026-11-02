@@ -193,6 +193,9 @@ class Guard:
         # Hard cap for movie versions: at most two independently identified
         # transferred/live/pending versions for the same media identity.
         movie_versions = set()
+        # TV version cap is per season/episode, not per show. A season pack
+        # contributes a version only for its explicitly identified episodes.
+        tv_versions = {}
         library_episodes = set((getattr(existing, 'seasons', None) or {}).get(season, []) or []) if tv and existing else set()
         # Completed transfers survive torrent removal and library-index delays.
         # Historical success alone is insufficient: the destination must still exist.
@@ -216,6 +219,7 @@ class Guard:
                     continue
                 pair = explicit_pairs(path.name)
                 if pair and pair[0] == season:
+                    tv_versions.setdefault(pair[1], set()).add((old_resolution, old_size))
                     size = candidate_size if pair == candidate_pair else 0
                     if blocks(candidate, old_resolution, size, old_size):
                         covered.add(pair[1])
@@ -273,6 +277,9 @@ class Guard:
                 if file.get('priority', 1) == 0 or Path(file['name']).suffix.lower() not in VIDEO:
                     continue
                 pair = explicit_pairs(Path(file['name']).name)
+                if pair and pair[0] == season:
+                    tv_versions.setdefault(pair[1], set()).add((resolution(Path(file['name']).name) or old_resolution,
+                                                                 int(file.get('size') or file.get('file_size') or 0)))
                 file_resolution = resolution(Path(file['name']).name) or old_resolution
                 file_size = int(file.get('size') or file.get('file_size') or 0)
                 size = candidate_size if pair == candidate_pair else 0
@@ -281,6 +288,8 @@ class Guard:
         pending = json.loads(self.pending.read_text()) if self.pending.exists() else []
         if not tv and len(movie_versions) >= 2:
             return '同一电影已有两个版本，达到版本上限', None
+        if tv and episodes and all(len(tv_versions.get(ep, set())) >= 2 for ep in episodes):
+            return '本季目标集均已有两个版本，达到版本上限', None
         now = time.time()
         pending = [p for p in pending if now - p['time'] < 120]
         for p in pending:
@@ -298,6 +307,10 @@ class Guard:
             if p['season'] == season:
                 if not p['episodes'] or not episodes:
                     return '同季资源刚刚提交，等待任务信息', None
+                for ep in p['episodes']:
+                    tv_versions.setdefault(ep, set()).add((p.get('resolution', 0), p.get('size', 0)))
+                if all(len(tv_versions.get(ep, set())) >= 2 for ep in episodes):
+                    return '本季目标集均已有两个版本，达到版本上限', None
                 covered.update(p['episodes'])
         if tv and episodes:
             missing = episodes - covered
