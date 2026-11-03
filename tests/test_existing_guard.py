@@ -66,9 +66,9 @@ class Tests(unittest.TestCase):
         p=self.root/'Show.S01E02.mkv';p.write_bytes(b'video')
         g=self.guard();g.transferred=lambda ident,season:[N(dest=str(p))]
         self.assertTrue(g.decide(self.media,self.meta,None)[0])
-    def test_stale_transfer_missing_file_allows(self):
+    def test_transfer_record_survives_missing_local_file_during_upload(self):
         g=self.guard();g.transferred=lambda ident,season:[N(dest=str(self.root/'missing.S01E02.mkv'))]
-        self.assertEqual(g.decide(self.media,self.meta,None),(None,None))
+        self.assertTrue(g.decide(self.media,self.meta,None)[0])
     def test_transferred_partial_pack(self):
         p=self.root/'Show.S01E02.mkv';p.write_bytes(b'video')
         g=self.guard();g.transferred=lambda ident,season:[N(dest=str(p))]
@@ -84,11 +84,11 @@ class Tests(unittest.TestCase):
         g=self.guard();g.transferred=lambda ident,season:[N(dest=str(p))]
         self.assertEqual(g.decide(self.media,self.meta,None),(None,None))
 
-    def test_2160_allows_after_1080_transfer(self):
+    def test_2160_blocks_after_1080_transfer_without_explicit_size_evidence(self):
         p=self.root/'Show.S01E02.1080p.mkv';p.write_bytes(b'video')
         g=self.guard();g.transferred=lambda ident,season:[N(dest=str(p))]
         self.meta._rss_resolution=2160
-        self.assertEqual(g.decide(self.media,self.meta,N(seasons={1:[2]})),(None,None))
+        self.assertTrue(g.decide(self.media,self.meta,N(seasons={1:[2]}))[0])
     def test_2160_blocks_after_2160_transfer(self):
         p=self.root/'Show.S01E02.2160p.mkv';p.write_bytes(b'video')
         g=self.guard();g.transferred=lambda ident,season:[N(dest=str(p))]

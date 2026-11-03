@@ -197,20 +197,25 @@ class Guard:
         # contributes a version only for its explicitly identified episodes.
         tv_versions = {}
         library_episodes = set((getattr(existing, 'seasons', None) or {}).get(season, []) or []) if tv and existing else set()
-        # Completed transfers survive torrent removal and library-index delays.
-        # Historical success alone is insufficient: the destination must still exist.
+        # A successful MoviePilot transfer is a completed download even when
+        # upload/Emby indexing is delayed by remote rate limits. Emby absence
+        # must never turn this fact back into a missing episode.
         if self.transferred:
             for row in self.transferred(ident, season):
                 path = Path(row.dest or '')
                 if not path.is_absolute() or path.suffix.lower() not in VIDEO:
                     continue
                 try:
-                    if not path.is_file() or path.stat().st_size <= 0:
+                    # A local destination may be moved to an upload queue or
+                    # replaced by a STRM path after transfer. TransferHistory
+                    # status is the authoritative completed-download fact;
+                    # only reject explicitly invalid paths, not remote latency.
+                    if path.exists() and path.is_file() and path.stat().st_size <= 0:
                         continue
                 except OSError as exc:
                     raise RuntimeError('无法核实整理目标文件，延后处理') from exc
                 old_resolution = resolution(path.name)
-                old_size = path.stat().st_size
+                old_size = path.stat().st_size if path.is_file() else 0
                 if not tv:
                     movie_versions.add((old_resolution, old_size))
                     if blocks(candidate, old_resolution, candidate_size, old_size):
@@ -220,11 +225,15 @@ class Guard:
                 pair = explicit_pairs(path.name)
                 if pair and pair[0] == season:
                     tv_versions.setdefault(pair[1], set()).add((old_resolution, old_size))
-                    size = candidate_size if pair == candidate_pair else 0
-                    if blocks(candidate, old_resolution, size, old_size):
+                    # Transfer history proves the episode was downloaded; do
+                    # not use its size to demand another copy while uploading.
+                    if blocks(candidate, old_resolution, 0, 0):
                         covered.add(pair[1])
                     else:
-                        verified_low.add(pair[1])
+                        # A lower-quality candidate does not invalidate a
+                        # completed transfer; it remains covered until a real
+                        # explicit upgrade policy is requested.
+                        covered.add(pair[1])
         if not tv and existing and not verified_low_movie:
             return '媒体库已有电影，尚无可靠1080p升级依据', None
         covered.update(library_episodes - verified_low)
