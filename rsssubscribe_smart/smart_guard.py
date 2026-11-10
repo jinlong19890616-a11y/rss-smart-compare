@@ -180,7 +180,7 @@ class Guard:
             raise RuntimeError('媒体身份不明确，延后处理')
         tv = ident[0] == '电视剧'
         season = getattr(meta, 'begin_season', None)
-        episodes = set(getattr(meta, 'episode_list', None) or [])
+        episodes = set(getattr(meta, '_rss_actual_episodes', None) or getattr(meta, 'episode_list', None) or [])
         seasons = set(getattr(meta, 'season_list', None) or [])
         if tv and (season is None or len(seasons) > 1):
             raise RuntimeError('跨季包或季号不明确，需人工确认后下载')
@@ -304,6 +304,10 @@ class Guard:
         for p in pending:
             if tuple(p['identity']) != ident:
                 continue
+            # Count pending versions even when quality would otherwise allow an upgrade.
+            if tv and p.get('season') == season:
+                for ep in p.get('episodes', []):
+                    tv_versions.setdefault(ep, set()).add((p.get('resolution', 0), p.get('size', 0)))
             # Legacy pending rows and pack totals have no per-episode scope.
             size = candidate_size if not tv or tuple(p.get('size_episode') or []) == candidate_pair else 0
             if not blocks(candidate, p.get('resolution', 0), size, p.get('size', 0)):
@@ -322,7 +326,8 @@ class Guard:
                     return '本季目标集均已有两个版本，达到版本上限', None
                 covered.update(p['episodes'])
         if tv and episodes:
-            missing = episodes - covered
+            capped = {ep for ep in episodes if len(tv_versions.get(ep, set())) >= 2}
+            missing = episodes - covered - capped
             if not missing:
                 return '同季集已在媒体库或下载任务中', None
             return None, missing if missing != episodes else None

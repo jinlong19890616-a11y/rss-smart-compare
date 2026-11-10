@@ -17,6 +17,8 @@ from app.db import SessionFactory
 from app.db.models.transferhistory import TransferHistory
 from app.modules.qbittorrent import QbittorrentModule
 from .smart_guard import Guard, exclusive, resolution, rule_matches
+from .preflight import actual_episodes, hash_exists
+from torrentool.api import Torrent
 from .subscription_flow import ensure_subscription
 from .identity import identity_title_candidates as shared_identity_title_candidates
 from app.core.config import settings
@@ -88,7 +90,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.8.0-identity-fallback"
+    plugin_version = "0.8.5"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -864,27 +866,28 @@ class RssSubscribeSmart(_PluginBase):
                                           DownloadHistoryOper(), logger,
                                           transferred=verified_transfer_candidates)
                             live_existing = media_exists_cached(mediainfo)
-                            # For season-only RSS entries, derive the concrete target
-                            # episodes from recognized TMDB season metadata. Passing a
-                            # non-empty set into MoviePilot's download chain makes it
-                            # pause qBittorrent, inspect files, set priority=0/1, and
-                            # resume safely.
-                            if mediainfo.type == MediaType.TV and not (meta.episode_list or []):
-                                season = meta.begin_season
-                                known_season_episodes = set(
-                                    (getattr(mediainfo, 'seasons', None) or {}).get(season, []) or []
-                                )
-                                if not known_season_episodes:
-                                    logger.warning(
-                                        f"RSS_SMART_DEFER {mediainfo.title_year} {meta.season}: "
-                                        "无法取得该季明确集数，禁止整季下载"
-                                    )
+                            # Inspect real torrent metadata BEFORE adding any task.
+                            # Never infer a release's contents from TMDB season totals.
+                            torrent_content, _, torrent_files = downloadchain.download_torrent(torrentinfo)
+                            if not isinstance(torrent_content, bytes):
+                                logger.warning(f"RSS_PREFLIGHT_DEFER {mediainfo.title_year}: 无法取得种子元数据，不提交任务")
+                                continue
+                            torrent_hash = Torrent.from_string(torrent_content).info_hash
+                            if hash_exists(module, torrent_hash):
+                                logger.info(f"RSS_HASH_SKIP {mediainfo.title_year}: 同hash任务已存在，不重复提交")
+                                continue
+                            real_episodes = None
+                            if mediainfo.type == MediaType.TV:
+                                real_episodes = actual_episodes(torrent_files, meta.begin_season)
+                                requested = set(meta.episode_list or [])
+                                if requested:
+                                    real_episodes &= requested
+                                if not real_episodes:
+                                    logger.info(f"RSS_PREFLIGHT_SKIP {mediainfo.title_year}: 种子不包含目标集")
                                     continue
-                                # MetaInfo.episode_list is a read-only derived
-                                # property. Set its source range instead of assigning
-                                # to the property directly.
-                                meta.begin_episode = min(known_season_episodes)
-                                meta.end_episode = max(known_season_episodes)
+                                meta._rss_actual_episodes = real_episodes
+                                meta.begin_episode = min(real_episodes)
+                                meta.end_episode = max(real_episodes)
                             reason, selected = guard.decide(mediainfo, meta, live_existing)
                             if reason:
                                 logger.info(f"RSS_DEDUPE_SKIP {mediainfo.title_year} {meta.season_episode}: {reason}")
@@ -893,7 +896,7 @@ class RssSubscribeSmart(_PluginBase):
                                 logger.info(f"RSS_DEDUPE_PARTIAL {mediainfo.title_year}: 仅下载缺失集 {sorted(selected)}")
                             download_episodes = selected
                             if download_episodes is None and mediainfo.type == MediaType.TV:
-                                download_episodes = set(meta.episode_list or [])
+                                download_episodes = set(real_episodes or [])
                             if mediainfo.type == MediaType.TV:
                                 logger.info(
                                     f"RSS_FILE_SELECT_PLAN {mediainfo.title_year}: "
@@ -904,13 +907,14 @@ class RssSubscribeSmart(_PluginBase):
                                 context=Context(meta_info=meta, media_info=mediainfo,
                                                 torrent_info=torrentinfo),
                                 episodes=download_episodes,
+                                torrent_content=torrent_content,
                                 save_path=(self._save_path or "").strip() or None,
                                 username="RSS订阅"
                             )
                             if not result:
                                 logger.error(f'{title} 下载失败；不记录媒体占位，允许补下')
                                 continue
-                            guard.reserve(mediainfo, meta, result, selected)
+                            guard.reserve(mediainfo, meta, result, download_episodes)
                             if mediainfo.type == MediaType.MOVIE:
                                 submitted_movie_keys.add(movie_key)
                     else:
