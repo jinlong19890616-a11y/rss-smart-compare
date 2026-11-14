@@ -20,7 +20,7 @@ from .smart_guard import Guard, exclusive, resolution, rule_matches
 from .preflight import actual_episodes, hash_exists
 from torrentool.api import Torrent
 from .subscription_flow import ensure_subscription
-from .identity import identity_title_candidates as shared_identity_title_candidates
+from .identity import identity_title_candidates as shared_identity_title_candidates, is_ambiguous_english_title
 from app.core.config import settings
 from app.core.context import MediaInfo, TorrentInfo, Context
 from app.core.metainfo import MetaInfo
@@ -90,7 +90,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.8.5"
+    plugin_version = "0.8.6"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -798,6 +798,9 @@ class RssSubscribeSmart(_PluginBase):
                             break
                     if not mediainfo:
                         logger.warn(f'RSS_IDENTITY_DEFER {title}: 未识别到媒体信息')
+                        continue
+                    if is_ambiguous_english_title(title, mediainfo, meta):
+                        logger.warning(f'RSS_IDENTITY_AMBIGUOUS {title}: 英文标题歧义且未通过年份校验，延后处理')
                         continue
                     media_rule_resolution = self._tv_min_resolution if mediainfo.type == MediaType.TV else self._movie_min_resolution
                     media_rule_subtitle = self._tv_subtitle_mode if mediainfo.type == MediaType.TV else self._movie_subtitle_mode
