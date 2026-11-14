@@ -17,7 +17,8 @@ from app.db import SessionFactory
 from app.db.models.transferhistory import TransferHistory
 from app.modules.qbittorrent import QbittorrentModule
 from .smart_guard import Guard, exclusive, resolution, rule_matches
-from .preflight import actual_episodes, hash_exists
+from .preflight import (actual_episodes, hash_exists, looks_like_torrent,
+                        torrent_payload_diagnostic, DeferCache)
 from torrentool.api import Torrent
 from .subscription_flow import ensure_subscription
 from .identity import identity_title_candidates as shared_identity_title_candidates, is_ambiguous_english_title
@@ -90,7 +91,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.8.6"
+    plugin_version = "0.8.7"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -690,6 +691,8 @@ class RssSubscribeSmart(_PluginBase):
         # One successful movie submission per media identity in a single RSS round.
         # TV keeps episode-level behavior so separate missing episodes are not lost.
         submitted_movie_keys = set()
+        defer_cache = DeferCache(settings.PLUGIN_DATA_PATH)
+        defer_cache.begin_round()
         cache_hits = {'media': 0, 'library': 0, 'subscription': 0}
 
         def recognize_cached(meta, key):
@@ -747,12 +750,21 @@ class RssSubscribeSmart(_PluginBase):
                     size = result.get("size") or 0
                     pubdate: datetime.datetime = result.get("pubdate")
                     fingerprint = (str(title).strip(), str(size), str(enclosure or link).strip())
+                    # Site download links carry a rotating signature/timestamp.
+                    # Backoff therefore keys on the stable release identity.
+                    defer_key = (str(title).strip(), str(size))
                     if fingerprint in seen_fingerprints:
                         logger.info(f"RSS_DUPLICATE_SKIP {title}: 本轮重复资源")
                         continue
                     seen_fingerprints.add(fingerprint)
                     # 检查是否处理过
                     if not title or (not download_mode and title in [h.get("key") for h in history]):
+                        continue
+                    # A broken link or an unmappable torrent cannot improve on a
+                    # later poll; skip it during the backoff window instead of
+                    # re-fetching the same error page every refresh.
+                    if defer_cache.is_deferred(defer_key):
+                        logger.info(f"RSS_DEFER_BACKOFF {title}: 该资源此前发生确定性失败，冷却中跳过")
                         continue
                     # Do not use a time-based resource cooldown here.  Current
                     # qBittorrent tasks, download history, library state, and the
@@ -872,16 +884,35 @@ class RssSubscribeSmart(_PluginBase):
                             # Inspect real torrent metadata BEFORE adding any task.
                             # Never infer a release's contents from TMDB season totals.
                             torrent_content, _, torrent_files = downloadchain.download_torrent(torrentinfo)
-                            if not isinstance(torrent_content, bytes):
-                                logger.warning(f"RSS_PREFLIGHT_DEFER {mediainfo.title_year}: 无法取得种子元数据，不提交任务")
+                            if not looks_like_torrent(torrent_content):
+                                logger.warning(
+                                    f"RSS_TORRENT_INVALID {title}: 站点返回的不是有效种子 "
+                                    f"({torrent_payload_diagnostic(torrent_content)})；本资源冷却"
+                                )
+                                defer_cache.mark(defer_key, 'non-torrent payload')
                                 continue
-                            torrent_hash = Torrent.from_string(torrent_content).info_hash
+                            try:
+                                torrent_hash = Torrent.from_string(torrent_content).info_hash
+                            except Exception as err:
+                                logger.warning(
+                                    f"RSS_TORRENT_INVALID {title}: 种子解析失败 "
+                                    f"({type(err).__name__}: {str(err)[:120]})；本资源冷却"
+                                )
+                                defer_cache.mark(defer_key, 'torrent parse failed')
+                                continue
                             if hash_exists(module, torrent_hash):
                                 logger.info(f"RSS_HASH_SKIP {mediainfo.title_year}: 同hash任务已存在，不重复提交")
                                 continue
                             real_episodes = None
                             if mediainfo.type == MediaType.TV:
-                                real_episodes = actual_episodes(torrent_files, meta.begin_season)
+                                try:
+                                    real_episodes = actual_episodes(torrent_files, meta.begin_season)
+                                except (ValueError, TypeError) as err:
+                                    logger.warning(
+                                        f"RSS_EPISODE_DEFER {title}: {err}；该资源集数映射不可解，本资源冷却"
+                                    )
+                                    defer_cache.mark(defer_key, f'episode mapping: {err}')
+                                    continue
                                 requested = set(meta.episode_list or [])
                                 if requested:
                                     real_episodes &= requested
@@ -915,6 +946,25 @@ class RssSubscribeSmart(_PluginBase):
                                 username="RSS订阅"
                             )
                             if not result:
+                                # MoviePilot can hand the task to qBittorrent and
+                                # still return a falsy result when reading the
+                                # freshly created task back fails. Treat a hash
+                                # already present in the downloader as submitted,
+                                # otherwise the next poll re-adds the same release.
+                                try:
+                                    if hash_exists(module, torrent_hash):
+                                        logger.warning(
+                                            f'{title} 下载器已存在同hash任务，但接口未返回任务信息；按已提交占位'
+                                        )
+                                        guard.reserve(mediainfo, meta, torrent_hash, download_episodes)
+                                        if mediainfo.type == MediaType.MOVIE:
+                                            submitted_movie_keys.add(movie_key)
+                                        continue
+                                except Exception as err:
+                                    logger.warning(
+                                        f'{title} 提交结果异常，下载器复查失败：'
+                                        f'{type(err).__name__}: {str(err)[:120]}'
+                                    )
                                 logger.error(f'{title} 下载失败；不记录媒体占位，允许补下')
                                 continue
                             guard.reserve(mediainfo, meta, result, download_episodes)

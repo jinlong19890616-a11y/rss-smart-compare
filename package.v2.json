@@ -3,13 +3,14 @@
     "name": "智能补集 RSS",
     "description": "按媒体库已有集数跳过重复，并按电视剧/电影分别设置分辨率与中文字幕规则；整季包按 qBittorrent 文件选择缺集。",
     "labels": "订阅,下载,辅助",
-    "version": "0.8.6",
+    "version": "0.8.7",
     "icon": "https://raw.githubusercontent.com/jinlong19890616-a11y/rss-smart-compare/main/icon.png",
     "author": "jinlong19890616-a11y",
     "level": 2,
     "v3": false,
     "release": false,
     "history": {
+      "0.8.7": "修复站点返回JSON/HTML非种子内容和集数映射不可解时每轮反复重试：显式校验种子载荷并记录脱敏诊断，仅对这类确定性失败按标题+大小做6小时冷却（不恢复0.5.2移除的通用资源冷却，不影响正常重试与更优资源）；下载接口返回空但qBittorrent已有同hash任务时按已提交占位，避免下一轮重复提交。",
       "0.8.6": "增强英文资源识别：无中文但标题、年份和媒体匹配明确时继续下载；Wonderland等高歧义英文标题无法确认时延后，优先使用明确中文标题字段。",
       "0.8.5": "下载前读取真实种子文件集并检查同hash任务；不再用TMDB总集数推断季包内容，逐集排除已达两个版本上限的集。",
       "0.8.4": "整理成功记录作为已下载事实，不再因 Google Drive/Emby 上传限流导致的媒体库暂时不可见而重复下载。"
