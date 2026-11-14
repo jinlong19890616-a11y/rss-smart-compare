@@ -22,6 +22,7 @@ from .preflight import (actual_episodes, hash_exists, looks_like_torrent,
 from torrentool.api import Torrent
 from .subscription_flow import ensure_subscription
 from .identity import identity_title_candidates as shared_identity_title_candidates, is_ambiguous_english_title
+from .season_identity import SeasonIdentityFixer, normalize_name as season_name_key
 from app.core.config import settings
 from app.core.context import MediaInfo, TorrentInfo, Context
 from app.core.metainfo import MetaInfo
@@ -32,6 +33,73 @@ from app.schemas import ExistMediaInfo
 from app.schemas.types import SystemConfigKey, MediaType
 
 lock = Lock()
+
+# Cap the extra TMDB detail lookups for one suspicious title.
+MAX_SEASON_IDENTITY_CANDIDATES = 10
+
+
+def collect_tmdb_candidates(name: str) -> List[dict]:
+    """Fetch same-name TV entries plus their real TMDB season lists.
+
+    A short-lived TmdbApi is used on purpose: this only runs for the handful of
+    titles that fail the season plausibility check, and the session is always
+    closed so a failed repair cannot leak an HTTP client into the plugin.
+    """
+    from app.modules.themoviedb.tmdbapi import TmdbApi
+    from app.schemas.types import MediaType
+
+    key = season_name_key(name)
+    if not key:
+        return []
+    api = TmdbApi()
+    try:
+        try:
+            hits = api.search.tv_shows(term=name) or []
+        except Exception as err:
+            logger.warning(f"RSS_SEASON_IDENTITY_SEARCH {name}: "
+                           f"TMDB同名搜索失败 {type(err).__name__}: {str(err)[:100]}")
+            return []
+        exact, loose = [], []
+        for hit in hits:
+            if not isinstance(hit, dict) or not hit.get("id"):
+                continue
+            names = {season_name_key(hit.get("name")),
+                     season_name_key(hit.get("original_name"))}
+            if key in names:
+                exact.append(hit)
+            elif any(n and (key in n or n in key) for n in names):
+                loose.append(hit)
+        candidates = []
+        for hit in (exact or loose)[:MAX_SEASON_IDENTITY_CANDIDATES]:
+            try:
+                cid = int(hit["id"])
+                detail = api.get_info(mtype=MediaType.TV, tmdbid=cid) or {}
+            except Exception:
+                continue
+            candidates.append({
+                "id": cid,
+                "name": hit.get("name"),
+                "original_name": hit.get("original_name"),
+                "first_air_date": detail.get("first_air_date") or hit.get("first_air_date"),
+                "number_of_seasons": detail.get("number_of_seasons"),
+                "seasons": detail.get("seasons") or [],
+                "popularity": hit.get("popularity") or 0,
+                "vote_count": hit.get("vote_count") or 0,
+            })
+        return candidates
+    finally:
+        api.close()
+
+
+def force_recognize_by_id(chain, tmdb_id: int, source_title: str):
+    """Re-run MoviePilot recognition pinned to a known TMDB ID.
+
+    A fresh MetaInfo is required: MoviePilot writes ``meta.tmdbid`` during the
+    call, and the RSS meta must stay clean for the download/subscribe context.
+    """
+    forced_meta = MetaInfo(title=source_title or "")
+    return chain.recognize_media(meta=forced_meta, mtype=MediaType.TV,
+                                 tmdbid=int(tmdb_id), cache=True)
 
 
 def _has_cjk(text: str) -> bool:
@@ -91,7 +159,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.8.7"
+    plugin_version = "0.8.8"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -126,6 +194,7 @@ class RssSubscribeSmart(_PluginBase):
     _movie_min_resolution: int = 0
     _tv_subtitle_mode: str = "any"
     _movie_subtitle_mode: str = "any"
+    _fix_season_identity: bool = True
 
     def init_plugin(self, config: dict = None):
 
@@ -152,6 +221,9 @@ class RssSubscribeSmart(_PluginBase):
             self._movie_min_resolution = int(config.get("movie_min_resolution") or 0)
             self._tv_subtitle_mode = config.get("tv_subtitle_mode") or "any"
             self._movie_subtitle_mode = config.get("movie_subtitle_mode") or "any"
+            # An existing saved config has no such key; keep the fix enabled.
+            fix_value = config.get("fix_season_identity")
+            self._fix_season_identity = True if fix_value is None else bool(fix_value)
 
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -487,6 +559,22 @@ class RssSubscribeSmart(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'fix_season_identity',
+                                            'label': '自动纠正季号不匹配的TMDB识别',
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     }
@@ -509,7 +597,8 @@ class RssSubscribeSmart(_PluginBase):
             "tv_min_resolution": 0,
             "movie_min_resolution": 0,
             "tv_subtitle_mode": "any",
-            "movie_subtitle_mode": "any"
+            "movie_subtitle_mode": "any",
+            "fix_season_identity": True
         }
 
     def get_page(self) -> List[dict]:
@@ -666,7 +755,8 @@ class RssSubscribeSmart(_PluginBase):
             "filter": self._filter,
             "action": self._action,
             "save_path": self._save_path,
-            "size_range": self._size_range
+            "size_range": self._size_range,
+            "fix_season_identity": self._fix_season_identity
         })
 
     def check(self):
@@ -693,6 +783,13 @@ class RssSubscribeSmart(_PluginBase):
         submitted_movie_keys = set()
         defer_cache = DeferCache(settings.PLUGIN_DATA_PATH)
         defer_cache.begin_round()
+        season_fixer = SeasonIdentityFixer(
+            collect_candidates=collect_tmdb_candidates,
+            recognize_by_id=lambda tmdb_id, source_title: force_recognize_by_id(
+                self.chain, tmdb_id, source_title),
+            logger=logger,
+            enabled=self._fix_season_identity,
+        )
         cache_hits = {'media': 0, 'library': 0, 'subscription': 0}
 
         def recognize_cached(meta, key):
@@ -811,6 +908,22 @@ class RssSubscribeSmart(_PluginBase):
                     if not mediainfo:
                         logger.warn(f'RSS_IDENTITY_DEFER {title}: 未识别到媒体信息')
                         continue
+                    if mediainfo.type == MediaType.TV:
+                        # Generic, word-list-free repair for the "old show +
+                        # newer namesake" mismatch. Only high-confidence cases
+                        # are rebound; everything else keeps the original
+                        # identity and continues to download normally.
+                        corrected = season_fixer.repair(
+                            mediainfo,
+                            names=[getattr(meta, 'name', None),
+                                   getattr(mediainfo, 'original_title', None),
+                                   getattr(mediainfo, 'title', None)],
+                            season=getattr(meta, 'begin_season', None),
+                            query_title=title,
+                        )
+                        if corrected is not mediainfo:
+                            mediainfo = corrected
+                            media_cache[identity_key] = corrected
                     if is_ambiguous_english_title(title, mediainfo, meta):
                         logger.warning(f'RSS_IDENTITY_AMBIGUOUS {title}: 英文标题歧义且未通过年份校验，延后处理')
                         continue
@@ -1005,6 +1118,11 @@ class RssSubscribeSmart(_PluginBase):
             f"media_keys={len(media_cache)} library_keys={len(existing_cache)} "
             f"subscription_keys={len(subscription_cache)}"
         )
+        if season_fixer.stats["suspect"]:
+            logger.info(
+                f"RSS_SEASON_IDENTITY_SUMMARY suspect={season_fixer.stats['suspect']} "
+                f"fixed={season_fixer.stats['fixed']} kept={season_fixer.stats['skipped']}"
+            )
         # 保存历史记录
         self.save_data('history', history)
         # 缓存只清理一次
