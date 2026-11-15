@@ -106,6 +106,22 @@ def _has_cjk(text: str) -> bool:
     return bool(re.search(r'[\\u3400-\\u9fff]', text or ''))
 
 
+def release_rank(item):
+    """Rank RSS releases best-first: resolution, then file size.
+
+    The size tie-break matters: several sites publish the same episode at the
+    same resolution but very different sizes. Submitting the small one first
+    makes the guard treat the larger release as an "upgrade" and download a
+    second version. Unknown/malformed sizes count as zero, so a release with a
+    known size is always preferred over one without it.
+    """
+    try:
+        size = float(item.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0.0
+    return resolution(item.get("title", "") or ""), size
+
+
 def identity_title_candidates(title: str, description: str = '') -> List[str]:
     """Return conservative alternate identity titles without changing download metadata."""
     title = str(title or '').strip()
@@ -159,7 +175,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.8.8"
+    plugin_version = "0.8.9"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -195,6 +211,9 @@ class RssSubscribeSmart(_PluginBase):
     _tv_subtitle_mode: str = "any"
     _movie_subtitle_mode: str = "any"
     _fix_season_identity: bool = True
+    # 1 = keep only the best (largest) release and never download a second
+    # version of the same episode/movie; 2 restores the historic wash policy.
+    _max_versions: int = 1
 
     def init_plugin(self, config: dict = None):
 
@@ -224,6 +243,12 @@ class RssSubscribeSmart(_PluginBase):
             # An existing saved config has no such key; keep the fix enabled.
             fix_value = config.get("fix_season_identity")
             self._fix_season_identity = True if fix_value is None else bool(fix_value)
+            # An existing saved config has no such key; default to a single
+            # download per episode/movie as requested.
+            try:
+                self._max_versions = max(1, min(2, int(config.get("max_versions") or 1)))
+            except (TypeError, ValueError):
+                self._max_versions = 1
 
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -511,6 +536,16 @@ class RssSubscribeSmart(_PluginBase):
                         ]
                     },
                     {
+                        'component': 'VRow', 'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{
+                                'component': 'VSelect', 'props': {'model': 'max_versions', 'label': '同一集/同一电影最多下载几个版本', 'items': [
+                                    {'title': '1 个（只下最大的，不洗版）', 'value': 1},
+                                    {'title': '2 个（允许更大/4K 资源洗版）', 'value': 2}
+                                ]}
+                            }]}
+                        ]
+                    },
+                    {
                         'component': 'VRow',
                         'content': [
                             {
@@ -598,7 +633,8 @@ class RssSubscribeSmart(_PluginBase):
             "movie_min_resolution": 0,
             "tv_subtitle_mode": "any",
             "movie_subtitle_mode": "any",
-            "fix_season_identity": True
+            "fix_season_identity": True,
+            "max_versions": 1
         }
 
     def get_page(self) -> List[dict]:
@@ -756,7 +792,8 @@ class RssSubscribeSmart(_PluginBase):
             "action": self._action,
             "save_path": self._save_path,
             "size_range": self._size_range,
-            "fix_season_identity": self._fix_season_identity
+            "fix_season_identity": self._fix_season_identity,
+            "max_versions": self._max_versions
         })
 
     def check(self):
@@ -778,9 +815,11 @@ class RssSubscribeSmart(_PluginBase):
         media_cache = {}
         existing_cache = {}
         subscription_cache = {}
-        # One successful movie submission per media identity in a single RSS round.
-        # TV keeps episode-level behavior so separate missing episodes are not lost.
+        # One successful submission per media identity in a single RSS round.
+        # TV keys include the exact episode set, so different missing episodes
+        # are still downloaded while a second version of the same episode is not.
         submitted_movie_keys = set()
+        submitted_tv_keys = set()
         defer_cache = DeferCache(settings.PLUGIN_DATA_PATH)
         defer_cache.begin_round()
         season_fixer = SeasonIdentityFixer(
@@ -833,7 +872,14 @@ class RssSubscribeSmart(_PluginBase):
                 return
         download_mode = self._action in ("download", "download_subscribe")
         if download_mode:
-            batch.sort(key=lambda item: resolution(item.get("title", "")), reverse=True)
+            # Pick the best release first: resolution, then size as a tie-break.
+            # Sorting only by resolution left equal-resolution releases in RSS
+            # publish order, so a 995M copy could be submitted before a 4.45G
+            # copy of the same episode; the guard then saw the bigger release as
+            # an "upgrade" and downloaded a second version. With the largest
+            # release submitted first, every smaller same-resolution release is
+            # blocked by the existing quality check.
+            batch.sort(key=release_rank, reverse=True)
         for url, results in [("本轮汇总（全部RSS）", batch)]:
             # 过滤规则
             filter_groups = self.systemconfig.get(SystemConfigKey.SubscribeFilterRuleGroups)
@@ -992,7 +1038,8 @@ class RssSubscribeSmart(_PluginBase):
                                 module.init_module()
                             guard = Guard(settings.PLUGIN_DATA_PATH, module,
                                           DownloadHistoryOper(), logger,
-                                          transferred=verified_transfer_candidates)
+                                          transferred=verified_transfer_candidates,
+                                          max_versions=self._max_versions)
                             live_existing = media_exists_cached(mediainfo)
                             # Inspect real torrent metadata BEFORE adding any task.
                             # Never infer a release's contents from TMDB season totals.
@@ -1044,7 +1091,19 @@ class RssSubscribeSmart(_PluginBase):
                             download_episodes = selected
                             if download_episodes is None and mediainfo.type == MediaType.TV:
                                 download_episodes = set(real_episodes or [])
+                            tv_key = None
                             if mediainfo.type == MediaType.TV:
+                                tv_key = (
+                                    getattr(mediainfo, 'tmdb_id', None),
+                                    getattr(meta, 'begin_season', None),
+                                    frozenset(download_episodes or []),
+                                )
+                                if tv_key in submitted_tv_keys:
+                                    logger.info(
+                                        f"RSS_ROUND_TV_DEDUPE {mediainfo.title_year}: "
+                                        f"本轮同集已提交更优版本，跳过其他版本"
+                                    )
+                                    continue
                                 logger.info(
                                     f"RSS_FILE_SELECT_PLAN {mediainfo.title_year}: "
                                     f"目标集={sorted(download_episodes or [])}; "
@@ -1072,6 +1131,8 @@ class RssSubscribeSmart(_PluginBase):
                                         guard.reserve(mediainfo, meta, torrent_hash, download_episodes)
                                         if mediainfo.type == MediaType.MOVIE:
                                             submitted_movie_keys.add(movie_key)
+                                        elif tv_key is not None:
+                                            submitted_tv_keys.add(tv_key)
                                         continue
                                 except Exception as err:
                                     logger.warning(
@@ -1083,6 +1144,8 @@ class RssSubscribeSmart(_PluginBase):
                             guard.reserve(mediainfo, meta, result, download_episodes)
                             if mediainfo.type == MediaType.MOVIE:
                                 submitted_movie_keys.add(movie_key)
+                            elif tv_key is not None:
+                                submitted_tv_keys.add(tv_key)
                     else:
                         # 检查是否在订阅中
                         subflag = subscription_exists_cached(mediainfo, meta)

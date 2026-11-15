@@ -165,13 +165,19 @@ def exclusive(root, timeout=30):
 
 
 class Guard:
-    def __init__(self, root, module, history, logger, transferred=None):
+    def __init__(self, root, module, history, logger, transferred=None, max_versions=2):
         self.root = Path(root)
         self.module = module
         self.history = history
         self.logger = logger
         self.pending = self.root / 'rss-download-pending.json'
         self.transferred = transferred
+        # 1 = download the single best release once, no later size/resolution
+        # "upgrade"; 2 keeps the historic two-version wash/upgrade policy.
+        try:
+            self.max_versions = max(1, int(max_versions))
+        except (TypeError, ValueError):
+            self.max_versions = 2
 
     def decide(self, media, meta, existing):
         """Return (skip reason, selected missing episodes or None). Called locked."""
@@ -190,8 +196,8 @@ class Guard:
         covered = set()
         verified_low = set()
         verified_low_movie = False
-        # Hard cap for movie versions: at most two independently identified
-        # transferred/live/pending versions for the same media identity.
+        # Hard cap for movie versions: at most max_versions independently
+        # identified transferred/live/pending versions for the same identity.
         movie_versions = set()
         # TV version cap is per season/episode, not per show. A season pack
         # contributes a version only for its explicitly identified episodes.
@@ -295,10 +301,11 @@ class Guard:
                 if pair and pair[0] == season and blocks(candidate, file_resolution, size, file_size):
                     covered.add(pair[1])
         pending = json.loads(self.pending.read_text()) if self.pending.exists() else []
-        if not tv and len(movie_versions) >= 2:
-            return '同一电影已有两个版本，达到版本上限', None
-        if tv and episodes and all(len(tv_versions.get(ep, set())) >= 2 for ep in episodes):
-            return '本季目标集均已有两个版本，达到版本上限', None
+        cap = self.max_versions
+        if not tv and len(movie_versions) >= cap:
+            return f'同一电影已有 {len(movie_versions)} 个版本，达到版本上限（{cap}）', None
+        if tv and episodes and all(len(tv_versions.get(ep, set())) >= cap for ep in episodes):
+            return f'本季目标集均已有 {cap} 个版本，达到版本上限', None
         now = time.time()
         pending = [p for p in pending if now - p['time'] < 120]
         for p in pending:
@@ -314,19 +321,19 @@ class Guard:
                 continue
             if not tv:
                 movie_versions.add((p.get('resolution', 0), p.get('size', 0)))
-                if len(movie_versions) >= 2:
-                    return '同一电影已有两个版本，达到版本上限', None
+                if len(movie_versions) >= cap:
+                    return f'同一电影已有 {len(movie_versions)} 个版本，达到版本上限（{cap}）', None
                 return '同一电影刚刚提交下载', None
             if p['season'] == season:
                 if not p['episodes'] or not episodes:
                     return '同季资源刚刚提交，等待任务信息', None
                 for ep in p['episodes']:
                     tv_versions.setdefault(ep, set()).add((p.get('resolution', 0), p.get('size', 0)))
-                if all(len(tv_versions.get(ep, set())) >= 2 for ep in episodes):
-                    return '本季目标集均已有两个版本，达到版本上限', None
+                if all(len(tv_versions.get(ep, set())) >= cap for ep in episodes):
+                    return f'本季目标集均已有 {cap} 个版本，达到版本上限', None
                 covered.update(p['episodes'])
         if tv and episodes:
-            capped = {ep for ep in episodes if len(tv_versions.get(ep, set())) >= 2}
+            capped = {ep for ep in episodes if len(tv_versions.get(ep, set())) >= cap}
             missing = episodes - covered - capped
             if not missing:
                 return '同季集已在媒体库或下载任务中', None
