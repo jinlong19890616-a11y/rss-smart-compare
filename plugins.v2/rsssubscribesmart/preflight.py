@@ -8,6 +8,22 @@ import time
 VIDEO = {'.mkv', '.mp4', '.avi', '.ts', '.m2ts', '.mov', '.wmv', '.webm', '.mpeg', '.mpg'}
 
 
+def disc_format_reason(files):
+    """Match the cleaner's disc policy using real torrent paths, not titles.
+
+    A BluRay/REMUX MKV is allowed. Any disc member rejects the entire release,
+    including mixed releases, so the downstream cleaner will not remove it.
+    Normalize Windows separators because torrent paths may use either style.
+    """
+    bad_suffixes = {'.iso', '.m2ts', '.vob', '.ifo', '.bup', '.bdmv', '.mpls', '.clpi'}
+    for name in files or []:
+        path = Path(str(name).replace('\\', '/'))
+        if ({part.casefold() for part in path.parts[:-1]} & {'bdmv', 'video_ts'}
+                or path.suffix.casefold() in bad_suffixes):
+            return 'disc_format'
+    return None
+
+
 def actual_episodes(files, season):
     episodes = set()
     for name in files:

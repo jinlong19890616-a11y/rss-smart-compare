@@ -33,5 +33,5 @@ class ActualScopeTests(fixtures.Tests):
         row=self.row()
         servers={h:N(get_torrents=lambda t=t:([t],False),get_files=lambda h:[{'name':'X.S01E02.1080p.mkv','size':10 if h=='a' else 20,'priority':1}]) for h,t in zip(['a','b'],tasks)}
         from smart_guard import Guard
-        g=Guard(self.root,N(get_instances=lambda:servers),N(get_by_hashes=lambda hs:{h:N(type='电视剧',tmdbid=123,seasons='S01',downloader=h) for h in hs}),None)
+        g=Guard(self.root,N(get_instances=lambda:servers),N(get_by_hashes=lambda hs:{h:N(type='电视剧',tmdbid=123,seasons='S01',downloader=h) for h in hs}),None,max_versions=2)
         self.assertEqual(g.decide(self.media,self.meta,None),(None,{3}))

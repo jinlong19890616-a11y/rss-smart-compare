@@ -165,19 +165,18 @@ def exclusive(root, timeout=30):
 
 
 class Guard:
-    def __init__(self, root, module, history, logger, transferred=None, max_versions=2):
+    def __init__(self, root, module, history, logger, transferred=None, max_versions=0):
         self.root = Path(root)
         self.module = module
         self.history = history
         self.logger = logger
         self.pending = self.root / 'rss-download-pending.json'
         self.transferred = transferred
-        # 1 = download the single best release once, no later size/resolution
-        # "upgrade"; 2 keeps the historic two-version wash/upgrade policy.
+        # 0 不限制累计版本数；1/2 保留既有版本上限策略。
         try:
-            self.max_versions = max(1, int(max_versions))
+            self.max_versions = max(0, int(max_versions))
         except (TypeError, ValueError):
-            self.max_versions = 2
+            self.max_versions = 0
 
     def decide(self, media, meta, existing):
         """Return (skip reason, selected missing episodes or None). Called locked."""
@@ -231,14 +230,13 @@ class Guard:
                 pair = explicit_pairs(path.name)
                 if pair and pair[0] == season:
                     tv_versions.setdefault(pair[1], set()).add((old_resolution, old_size))
-                    # Transfer history proves the episode was downloaded; do
-                    # not use its size to demand another copy while uploading.
-                    if blocks(candidate, old_resolution, 0, 0):
-                        covered.add(pair[1])
+                    # 整理成功仍是覆盖事实；只有本地同集文件提供完整质量
+                    # 依据，且 blocks 明确允许升级时，才能撤销媒体库覆盖。
+                    size = candidate_size if pair == candidate_pair else 0
+                    if (old_size > 0 and size > 0 and candidate and old_resolution
+                            and not blocks(candidate, old_resolution, size, old_size)):
+                        verified_low.add(pair[1])
                     else:
-                        # A lower-quality candidate does not invalidate a
-                        # completed transfer; it remains covered until a real
-                        # explicit upgrade policy is requested.
                         covered.add(pair[1])
         if not tv and existing and not verified_low_movie:
             return '媒体库已有电影，尚无可靠1080p升级依据', None
@@ -302,9 +300,9 @@ class Guard:
                     covered.add(pair[1])
         pending = json.loads(self.pending.read_text()) if self.pending.exists() else []
         cap = self.max_versions
-        if not tv and len(movie_versions) >= cap:
+        if cap and not tv and len(movie_versions) >= cap:
             return f'同一电影已有 {len(movie_versions)} 个版本，达到版本上限（{cap}）', None
-        if tv and episodes and all(len(tv_versions.get(ep, set())) >= cap for ep in episodes):
+        if cap and tv and episodes and all(len(tv_versions.get(ep, set())) >= cap for ep in episodes):
             return f'本季目标集均已有 {cap} 个版本，达到版本上限', None
         now = time.time()
         pending = [p for p in pending if now - p['time'] < 120]
@@ -315,13 +313,14 @@ class Guard:
             if tv and p.get('season') == season:
                 for ep in p.get('episodes', []):
                     tv_versions.setdefault(ep, set()).add((p.get('resolution', 0), p.get('size', 0)))
+            if not tv:
+                movie_versions.add((p.get('resolution', 0), p.get('size', 0)))
             # Legacy pending rows and pack totals have no per-episode scope.
             size = candidate_size if not tv or tuple(p.get('size_episode') or []) == candidate_pair else 0
             if not blocks(candidate, p.get('resolution', 0), size, p.get('size', 0)):
                 continue
             if not tv:
-                movie_versions.add((p.get('resolution', 0), p.get('size', 0)))
-                if len(movie_versions) >= cap:
+                if cap and len(movie_versions) >= cap:
                     return f'同一电影已有 {len(movie_versions)} 个版本，达到版本上限（{cap}）', None
                 return '同一电影刚刚提交下载', None
             if p['season'] == season:
@@ -329,11 +328,13 @@ class Guard:
                     return '同季资源刚刚提交，等待任务信息', None
                 for ep in p['episodes']:
                     tv_versions.setdefault(ep, set()).add((p.get('resolution', 0), p.get('size', 0)))
-                if all(len(tv_versions.get(ep, set())) >= cap for ep in episodes):
+                if cap and all(len(tv_versions.get(ep, set())) >= cap for ep in episodes):
                     return f'本季目标集均已有 {cap} 个版本，达到版本上限', None
                 covered.update(p['episodes'])
+        if cap and not tv and len(movie_versions) >= cap:
+            return f'同一电影已有 {len(movie_versions)} 个版本，达到版本上限（{cap}）', None
         if tv and episodes:
-            capped = {ep for ep in episodes if len(tv_versions.get(ep, set())) >= cap}
+            capped = {ep for ep in episodes if cap and len(tv_versions.get(ep, set())) >= cap}
             missing = episodes - covered - capped
             if not missing:
                 return '同季集已在媒体库或下载任务中', None
