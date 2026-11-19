@@ -1,6 +1,7 @@
 import datetime
 import re
 import traceback
+from copy import copy
 from pathlib import Path
 from threading import Lock
 from typing import Optional, Any, List, Dict, Tuple
@@ -13,6 +14,7 @@ from app import schemas
 from app.chain.download import DownloadChain
 from app.chain.subscribe import SubscribeChain
 from app.db.downloadhistory_oper import DownloadHistoryOper
+from app.db.site_oper import SiteOper
 from app.db import SessionFactory
 from app.db.models.transferhistory import TransferHistory
 from app.modules.qbittorrent import QbittorrentModule
@@ -21,8 +23,10 @@ from .preflight import (actual_episodes, hash_exists, looks_like_torrent,
                         torrent_payload_diagnostic, disc_format_reason, DeferCache)
 from torrentool.api import Torrent
 from .subscription_flow import ensure_subscription
+from .site_identity import snapshot_sites, match_site
 from .identity import identity_title_candidates as shared_identity_title_candidates, is_ambiguous_english_title
 from .season_identity import SeasonIdentityFixer, normalize_name as season_name_key
+from .recognition_review import RecognitionReviewer, apply_review
 from app.core.config import settings
 from app.core.context import MediaInfo, TorrentInfo, Context
 from app.core.metainfo import MetaInfo
@@ -55,10 +59,8 @@ def collect_tmdb_candidates(name: str) -> List[dict]:
     try:
         try:
             hits = api.search.tv_shows(term=name) or []
-        except Exception as err:
-            logger.warning(f"RSS_SEASON_IDENTITY_SEARCH {name}: "
-                           f"TMDB同名搜索失败 {type(err).__name__}: {str(err)[:100]}")
-            return []
+        except Exception:
+            raise RuntimeError("TMDB同名搜索失败") from None
         exact, loose = [], []
         for hit in hits:
             if not isinstance(hit, dict) or not hit.get("id"):
@@ -70,12 +72,16 @@ def collect_tmdb_candidates(name: str) -> List[dict]:
             elif any(n and (key in n or n in key) for n in names):
                 loose.append(hit)
         candidates = []
+        if len(exact or loose) > MAX_SEASON_IDENTITY_CANDIDATES:
+            raise RuntimeError("TMDB同名候选过多，无法完整复核")
         for hit in (exact or loose)[:MAX_SEASON_IDENTITY_CANDIDATES]:
             try:
                 cid = int(hit["id"])
                 detail = api.get_info(mtype=MediaType.TV, tmdbid=cid) or {}
             except Exception:
-                continue
+                raise RuntimeError("TMDB候选详情读取失败") from None
+            if not detail:
+                raise RuntimeError("TMDB候选详情为空")
             candidates.append({
                 "id": cid,
                 "name": hit.get("name"),
@@ -87,6 +93,18 @@ def collect_tmdb_candidates(name: str) -> List[dict]:
                 "vote_count": hit.get("vote_count") or 0,
             })
         return candidates
+    finally:
+        api.close()
+
+
+def tmdb_review_detail(tmdb_id: int, season: Optional[int] = None):
+    """使用已核实的 MoviePilot 接口读取详情或真实季集，不修改远程状态。"""
+    from app.modules.themoviedb.tmdbapi import TmdbApi
+    api = TmdbApi()
+    try:
+        if season is not None:
+            return api.get_tv_season_detail(tmdbid=tmdb_id, season=season)
+        return api.get_info(mtype=MediaType.TV, tmdbid=tmdb_id)
     finally:
         api.close()
 
@@ -175,7 +193,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.8.10"
+    plugin_version = "0.8.11"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -606,7 +624,7 @@ class RssSubscribeSmart(_PluginBase):
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'fix_season_identity',
-                                            'label': '自动纠正季号不匹配的TMDB识别',
+                                            'label': '自动复核TMDB身份、类别与真实季集',
                                         }
                                     }
                                 ]
@@ -807,6 +825,13 @@ class RssSubscribeSmart(_PluginBase):
             history = []
         else:
             history: List[dict] = self.get_data('history') or []
+        download_mode = self._action in ("download", "download_subscribe")
+        sites = ()
+        if download_mode:
+            try:
+                sites = snapshot_sites(SiteOper().list())
+            except Exception:
+                logger.warning("RSS_SITE_CONFIG_DEFER 站点信息读取失败，本轮保留原有下载行为")
         downloadchain = DownloadChain()
         subscribechain = SubscribeChain()
         # Process-local caches: they live for this RSS round only and are
@@ -826,6 +851,13 @@ class RssSubscribeSmart(_PluginBase):
                 self.chain, tmdb_id, source_title),
             logger=logger,
             enabled=self._fix_season_identity,
+        )
+        reviewer = RecognitionReviewer(
+            collect_candidates=collect_tmdb_candidates,
+            get_detail=tmdb_review_detail,
+            get_season=lambda cid, season: tmdb_review_detail(cid, season),
+            recognize_by_id=lambda cid, source: force_recognize_by_id(self.chain, cid, source),
+            logger=logger, enabled=self._fix_season_identity,
         )
         cache_hits = {'media': 0, 'library': 0, 'subscription': 0}
 
@@ -864,11 +896,10 @@ class RssSubscribeSmart(_PluginBase):
                 if not results:
                     logger.warning("RSS_FETCH_DEFER 某个RSS为空或读取失败，本轮暂缓，避免漏掉更高分辨率")
                     return
-                batch.extend(results)
+                batch.extend(dict(result, _source_feed_url=url) for result in results)
             except Exception:
                 logger.error("RSS_FETCH_DEFER 某个RSS读取失败，本轮不择优下载")
                 return
-        download_mode = self._action in ("download", "download_subscribe")
         if download_mode:
             # Pick the best release first: resolution, then size as a tie-break.
             # Sorting only by resolution left equal-resolution releases in RSS
@@ -967,7 +998,18 @@ class RssSubscribeSmart(_PluginBase):
                         )
                         if corrected is not mediainfo:
                             mediainfo = corrected
-                            media_cache[identity_key] = corrected
+                            meta.tmdbid = corrected.tmdb_id
+                            meta.year = corrected.year
+                    if not download_mode and mediainfo.type == MediaType.TV:
+                        review = reviewer.review(
+                            mediainfo, names=[meta.name, getattr(mediainfo, 'original_title', None),
+                                              getattr(mediainfo, 'title', None)],
+                            season=meta.begin_season, episodes=meta.episode_list,
+                            description=description, query_title=title)
+                        if review.blocked:
+                            continue
+                        mediainfo = review.media
+                        apply_review(meta, review)
                     if is_ambiguous_english_title(title, mediainfo, meta):
                         logger.warning(f'RSS_IDENTITY_AMBIGUOUS {title}: 英文标题歧义且未通过年份校验，延后处理')
                         continue
@@ -989,8 +1031,19 @@ class RssSubscribeSmart(_PluginBase):
                         pubdate=pubdate.strftime("%Y-%m-%d %H:%M:%S") if pubdate else None,
                         site_proxy=self._proxy,
                     )
+                    if download_mode:
+                        try:
+                            site = match_site(sites, link=link, enclosure=enclosure,
+                                              source_feed=result.get("_source_feed_url", ""))
+                            if site:
+                                # 在副本上装饰；字段校验失败时保留完整的原始下载上下文。
+                                decorated = copy(torrentinfo)
+                                decorated.site, decorated.site_name = site
+                                torrentinfo = decorated
+                        except Exception:
+                            logger.warning("RSS_SITE_METADATA_DEFER 站点信息补充失败，保留原有下载行为")
                     # 过滤种子
-                    if self._filter:
+                    if self._filter and not download_mode:
                         result = self.chain.filter_torrents(
                             rule_groups=filter_groups,
                             torrent_list=[torrentinfo],
@@ -1024,11 +1077,7 @@ class RssSubscribeSmart(_PluginBase):
                             if movie_key in submitted_movie_keys:
                                 logger.info(f"RSS_ROUND_MOVIE_DEDUPE {mediainfo.title_year}: 本轮已提交其他版本")
                                 continue
-                        # Subscription must not depend on a successful download or
-                        # a dedupe decision: an existing task may still leave later
-                        # episodes missing. Failures remain retryable next cycle.
-                        if self._action == "download_subscribe" and mediainfo.type == MediaType.TV:
-                            ensure_subscription(subscribechain, mediainfo, meta, logger)
+                        # 订阅在真实种子身份复核后、下载去重判断前创建；可疑资源不写订阅。
                         # Shared media-level guard: never delete existing torrents.
                         with exclusive(settings.PLUGIN_DATA_PATH):
                             module = QbittorrentModule()
@@ -1038,7 +1087,6 @@ class RssSubscribeSmart(_PluginBase):
                                           DownloadHistoryOper(), logger,
                                           transferred=verified_transfer_candidates,
                                           max_versions=self._max_versions)
-                            live_existing = media_exists_cached(mediainfo)
                             # Inspect real torrent metadata BEFORE adding any task.
                             # Never infer a release's contents from TMDB season totals.
                             torrent_content, _, torrent_files = downloadchain.download_torrent(torrentinfo)
@@ -1063,9 +1111,6 @@ class RssSubscribeSmart(_PluginBase):
                                     f"RSS_DISC_SKIP {title}: 种子包含原盘目录或文件，提交前跳过；继续择优其他版本"
                                 )
                                 continue
-                            if hash_exists(module, torrent_hash):
-                                logger.info(f"RSS_HASH_SKIP {mediainfo.title_year}: 同hash任务已存在，不重复提交")
-                                continue
                             real_episodes = None
                             if mediainfo.type == MediaType.TV:
                                 try:
@@ -1076,6 +1121,15 @@ class RssSubscribeSmart(_PluginBase):
                                     )
                                     defer_cache.mark(defer_key, f'episode mapping: {err}')
                                     continue
+                                review = reviewer.review(
+                                    mediainfo, names=[meta.name, getattr(mediainfo, 'original_title', None),
+                                                      getattr(mediainfo, 'title', None)],
+                                    season=meta.begin_season, episodes=real_episodes,
+                                    description=description, query_title=title)
+                                if review.blocked:
+                                    continue
+                                mediainfo = review.media
+                                apply_review(meta, review)
                                 requested = set(meta.episode_list or [])
                                 if requested:
                                     real_episodes &= requested
@@ -1090,6 +1144,18 @@ class RssSubscribeSmart(_PluginBase):
                                 meta._rss_actual_episodes = real_episodes
                                 meta.begin_episode = min(real_episodes)
                                 meta.end_episode = max(real_episodes)
+                            if self._filter:
+                                filtered = self.chain.filter_torrents(
+                                    rule_groups=filter_groups, torrent_list=[torrentinfo], mediainfo=mediainfo)
+                                if not filtered:
+                                    logger.info("RSS_RULE_SKIP 复核后的媒体不匹配过滤规则")
+                                    continue
+                            if self._action == "download_subscribe" and mediainfo.type == MediaType.TV:
+                                ensure_subscription(subscribechain, mediainfo, meta, logger)
+                            if hash_exists(module, torrent_hash):
+                                logger.info(f"RSS_HASH_SKIP {mediainfo.title_year}: 同hash任务已存在，不重复提交")
+                                continue
+                            live_existing = media_exists_cached(mediainfo)
                             reason, selected = guard.decide(mediainfo, meta, live_existing)
                             if reason:
                                 logger.info(f"RSS_DEDUPE_SKIP {mediainfo.title_year} {meta.season_episode}: {reason}")

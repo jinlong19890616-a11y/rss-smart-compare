@@ -411,12 +411,19 @@ class PluginFlowTests(unittest.TestCase):
     def setUp(self):
         import datetime
         import re
+        from copy import copy
+        from unittest.mock import Mock
+        from site_identity import match_site, snapshot_sites
+        from recognition_review import RecognitionReviewer, apply_review
         from preflight import (DeferCache, actual_episodes, disc_format_reason,
                                hash_exists, looks_like_torrent, torrent_payload_diagnostic)
         from smart_guard import exclusive, rule_matches
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.releases, self.submissions, self.tasks, self.logs = [], [], [], []
+        self.torrent_infos, self.submitted_infos = [], []
+        self.warnings = []
+        self.site_list = Mock(return_value=[])
         self.fail_titles, self.accepted_falsy = set(), set()
         from enum import Enum
         self.kind = Enum('MediaType', {'TV': '电视剧', 'MOVIE': '电影'})
@@ -445,6 +452,7 @@ class PluginFlowTests(unittest.TestCase):
                 return list(range(inner.begin_episode, inner.end_episode + 1))
 
         def download_torrent(info):
+            self.torrent_infos.append(info)
             release = next(r for r in self.releases if r['title'] == info.title)
             files = release.get('files')
             if files is None:
@@ -457,6 +465,7 @@ class PluginFlowTests(unittest.TestCase):
             if title in self.fail_titles:
                 return None
             self.submissions.append((title, None if eps is None else set(eps)))
+            self.submitted_infos.append(kwargs['context'].torrent_info)
             if title in self.accepted_falsy:
                 self.tasks.append({'hash': title, 'state': 'error'})
                 return None
@@ -464,9 +473,17 @@ class PluginFlowTests(unittest.TestCase):
 
         logger = N(**{level: lambda msg, *args: self.logs.append(str(msg))
                       for level in ('info', 'warning', 'warn', 'error')})
+        def warning(msg):
+            self.warnings.append(str(msg))
+            self.logs.append(str(msg))
+        logger.warning = warning
         server = N(get_torrents=lambda: (self.tasks, False))
         self.namespace = {
             'datetime': datetime, 're': re, 'Guard': Guard, 'resolution': resolution,
+            'copy': copy, 'match_site': match_site, 'snapshot_sites': snapshot_sites,
+            'SiteOper': lambda: N(list=self.site_list),
+            'RecognitionReviewer': RecognitionReviewer, 'apply_review': apply_review,
+            'tmdb_review_detail': lambda *args: None,
             'release_rank': load_release_rank(), 'exclusive': exclusive,
             'rule_matches': rule_matches, 'DeferCache': DeferCache,
             'actual_episodes': actual_episodes, 'disc_format_reason': disc_format_reason,
@@ -606,6 +623,214 @@ class PluginFlowTests(unittest.TestCase):
     def test_history_entry_does_not_prevent_later_upgrade(self):
         self.saved['history'] = [{'key': self.release(size=200)['title']}]
         self.assertEqual(self.run_round([self.release(size=200)]), [{1}])
+
+
+class SiteMetadataFlowTests(unittest.TestCase):
+    def setUp(self):
+        # 复用离线夹具，执行完整的生产check而非匹配逻辑的替代实现。
+        self.flow = PluginFlowTests()
+        self.flow.setUp()
+        self.addCleanup(self.flow.doCleanups)
+        self.row = N(id=12, name='M-Team', domain='m-team.cc',
+                     url='https://kp.m-team.cc/', rss='https://rss.m-team.cc/feed?token=fake',
+                     cookie='fake-cookie', ua='fake-ua', downloader='fake-downloader', proxy=True)
+        self.flow.site_list.return_value = [self.row]
+
+    def test_decorates_both_download_contexts_and_only_identity_fields(self):
+        f = self.flow
+        release = f.release(link='https://kp.m-team.cc/details/1',
+                            enclosure='https://rss.m-team.cc/download/1?token=fake')
+        f.run_round([release])
+        f.site_list.assert_called_once_with()
+        self.assertEqual(len(f.torrent_infos), 1)
+        self.assertIs(f.torrent_infos[0], f.submitted_infos[0])
+        self.assertEqual(vars(f.torrent_infos[0]), dict(
+            title=release['title'], description='', enclosure=release['enclosure'],
+            page_url=release['link'], size=100, pubdate=None, site_proxy=False,
+            site=12, site_name='M-Team'))
+        self.assertFalse(any('RSS_SITE_' in log for log in f.logs))
+
+    def test_config_loaded_once_per_round_not_per_feed_or_item(self):
+        f = self.flow
+        f.plugin._address = 'https://rss.m-team.cc/feed\nhttps://other.test/feed'
+        f.run_round([f.release(), f.release('S01E02', eps=(2,))])
+        self.assertEqual(len(f.submissions), 2)
+        f.site_list.assert_called_once_with()
+        f.run_round([f.release('S01E03', eps=(3,))])
+        self.assertEqual(f.site_list.call_count, 2)
+
+    def test_next_round_reloads_changed_site_config(self):
+        f = self.flow
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        f.site_list.return_value = [N(id=34, name='Renamed', domain='m-team.cc', url='', rss='')]
+        f.run_round([f.release('S01E02', eps=(2,), link='https://m-team.cc/2')])
+        self.assertEqual([(info.site, info.site_name) for info in f.submitted_infos],
+                         [(12, 'M-Team'), (34, 'Renamed')])
+        self.assertEqual(f.site_list.call_count, 2)
+
+    def test_config_exception_is_generic_warning_and_download_continues(self):
+        f = self.flow
+        f.site_list.side_effect = RuntimeError('https://secret.test/feed?token=fake-cookie')
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        self.assertEqual(len(f.submissions), 1)
+        self.assertFalse(hasattr(f.torrent_infos[0], 'site'))
+        self.assertEqual(f.warnings, ['RSS_SITE_CONFIG_DEFER 站点信息读取失败，本轮保留原有下载行为'])
+        self.assertNotIn('secret.test', '\n'.join(f.logs))
+        self.assertNotIn('fake-cookie', '\n'.join(f.logs))
+
+    def test_config_constructor_failure_keeps_download(self):
+        f = self.flow
+        def fail():
+            raise RuntimeError('fake-secret')
+        f.namespace['SiteOper'] = fail
+        f.run_round([f.release()])
+        self.assertEqual(len(f.submissions), 1)
+        self.assertEqual(f.warnings, ['RSS_SITE_CONFIG_DEFER 站点信息读取失败，本轮保留原有下载行为'])
+
+    def test_snapshot_failure_keeps_download_without_sensitive_log(self):
+        f = self.flow
+        class BrokenSite:
+            @property
+            def id(self):
+                raise ValueError('https://secret.test/?rss=fake')
+        f.site_list.return_value = [BrokenSite()]
+        f.run_round([f.release()])
+        self.assertEqual(len(f.submissions), 1)
+        self.assertEqual(f.warnings, ['RSS_SITE_CONFIG_DEFER 站点信息读取失败，本轮保留原有下载行为'])
+
+    def test_feed_provenance_survives_merge_sort_and_does_not_mutate_input(self):
+        f = self.flow
+        first, second = f.release(size=100), f.release('S01E02', size=200, eps=(2,))
+        first['_source_feed_url'] = 'https://forged.test/feed'
+        originals = [dict(first), dict(second)]
+        f.releases = [first, second]
+        a, b = 'https://rss.m-team.cc/feed?token=fake', 'https://rss.other.test/feed?token=fake'
+        other = N(id=34, name='Other', domain='other.test', url='', rss=b)
+        f.site_list.return_value = [self.row, other]
+        f.plugin._address = a + '\n' + b
+        feeds = {a: [first], b: [second]}
+        f.namespace['RssHelper'] = lambda: N(parse=lambda url, **kw: feeds[url])
+        f.plugin.check()
+        self.assertEqual([info.site for info in f.torrent_infos], [34, 12])
+        self.assertEqual([first, second], originals)
+        self.assertEqual([info.site_name for info in f.submitted_infos], ['Other', 'M-Team'])
+        self.assertFalse(any('token=' in log for log in f.logs))
+
+    def test_unknown_third_party_stays_unlabelled_despite_known_feed(self):
+        f = self.flow
+        f.plugin._address = self.row.rss
+        f.run_round([f.release(link='https://third.test/details/1',
+                               enclosure='https://third.test/?next=https://m-team.cc/1')])
+        self.assertEqual(len(f.submissions), 1)
+        self.assertFalse(hasattr(f.torrent_infos[0], 'site'))
+
+    def test_conflict_still_downloads_without_identity(self):
+        f = self.flow
+        f.site_list.return_value.append(N(id=34, name='Other', domain='other.test', url='', rss=''))
+        f.run_round([f.release(link='https://m-team.cc/1', enclosure='https://other.test/1')])
+        self.assertEqual(len(f.submissions), 1)
+        self.assertFalse(hasattr(f.torrent_infos[0], 'site'))
+
+    def test_matching_failure_does_not_skip_current_or_next_item(self):
+        from unittest.mock import Mock
+        f = self.flow
+        f.namespace['match_site'] = Mock(side_effect=[RuntimeError('https://secret.test/?token=fake'),
+                                                     (12, 'M-Team')])
+        f.run_round([f.release(size=200), f.release('S01E02', eps=(2,))])
+        self.assertEqual(len(f.submissions), 2)
+        self.assertFalse(hasattr(f.torrent_infos[0], 'site'))
+        self.assertEqual(f.torrent_infos[1].site, 12)
+        self.assertEqual(f.warnings, ['RSS_SITE_METADATA_DEFER 站点信息补充失败，保留原有下载行为'])
+
+    def test_assignment_failure_is_atomic_and_keeps_download(self):
+        f = self.flow
+        class RejectName(N):
+            def __setattr__(self, name, value):
+                if name == 'site_name':
+                    raise ValueError('fake-sensitive-error')
+                super().__setattr__(name, value)
+        f.namespace['TorrentInfo'] = RejectName
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        self.assertEqual(len(f.submissions), 1)
+        self.assertFalse(hasattr(f.torrent_infos[0], 'site'))
+        self.assertFalse(hasattr(f.torrent_infos[0], 'site_name'))
+        self.assertEqual(f.warnings, ['RSS_SITE_METADATA_DEFER 站点信息补充失败，保留原有下载行为'])
+
+    def test_copy_failure_keeps_download(self):
+        f = self.flow
+        def fail(_):
+            raise RuntimeError('fake-sensitive-error')
+        f.namespace['copy'] = fail
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        self.assertEqual(len(f.submissions), 1)
+        self.assertFalse(hasattr(f.torrent_infos[0], 'site'))
+        self.assertEqual(f.warnings, ['RSS_SITE_METADATA_DEFER 站点信息补充失败，保留原有下载行为'])
+
+    def test_metadata_failure_does_not_skip_existing_filter(self):
+        from unittest.mock import Mock
+        f = self.flow
+        f.plugin._filter = True
+        f.namespace['match_site'] = Mock(side_effect=ValueError('fake-secret'))
+        f.plugin.chain.filter_torrents = Mock(side_effect=lambda **kw: kw['torrent_list'])
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        f.plugin.chain.filter_torrents.assert_called_once()
+        self.assertEqual(len(f.submissions), 1)
+        self.assertFalse(hasattr(f.submitted_infos[0], 'site'))
+
+    def test_download_subscribe_gets_site_identity(self):
+        f = self.flow
+        f.plugin._action = 'download_subscribe'
+        f.namespace['ensure_subscription'] = lambda *args: None
+        f.run_round([f.release(enclosure='https://m-team.cc/1')])
+        self.assertEqual(f.submitted_infos[0].site, 12)
+
+    def test_subscription_only_does_not_read_sites_or_decorate(self):
+        from unittest.mock import Mock
+        f = self.flow
+        f.plugin._action = 'subscribe'
+        add = Mock()
+        f.namespace['SubscribeChain'] = lambda: N(exists=lambda **kw: False, add=add)
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        f.site_list.assert_not_called()
+        add.assert_called_once()
+        self.assertEqual(f.torrent_infos, [])
+
+    def test_empty_feed_address_does_not_read_sites(self):
+        f = self.flow
+        f.plugin._address = ''
+        f.plugin.check()
+        f.site_list.assert_not_called()
+
+    def test_sensitive_fields_are_not_accessed(self):
+        f = self.flow
+        class SafeFieldsOnly:
+            id, name = 12, 'M-Team'
+            domain, url, rss = 'm-team.cc', '', ''
+            def __getattr__(self, name):
+                raise AssertionError('不应访问下载设置或凭证字段')
+        f.site_list.return_value = [SafeFieldsOnly()]
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        self.assertEqual(f.torrent_infos[0].site, 12)
+        self.assertEqual(f.warnings, [])
+
+    def test_existing_proxy_flag_is_preserved(self):
+        f = self.flow
+        self.row.proxy = False
+        f.plugin._proxy = True
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        self.assertTrue(f.torrent_infos[0].site_proxy)
+
+    def test_identity_available_to_existing_torrent_filter(self):
+        f = self.flow
+        f.plugin._filter = True
+        captured = []
+        def filter_torrents(**kw):
+            captured.extend(kw['torrent_list'])
+            return kw['torrent_list']
+        f.plugin.chain.filter_torrents = filter_torrents
+        f.run_round([f.release(link='https://m-team.cc/1')])
+        self.assertEqual(captured[0].site, 12)
+        self.assertIs(captured[0], f.submitted_infos[0])
 
 
 if __name__ == '__main__':
