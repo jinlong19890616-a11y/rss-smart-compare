@@ -399,8 +399,13 @@ def load_plugin_class(namespace):
     # 提取原样生产类，不依赖 MoviePilot 安装；check/Guard 不做替代实现。
     import __future__
     tree = ast.parse((ROOT / 'rsssubscribe_smart' / '__init__.py').read_text())
-    nodes = [node for node in tree.body if isinstance(node, ast.ClassDef)
-             and node.name == 'RssSubscribeSmart']
+    from threading import Lock
+    namespace['Lock'] = Lock
+    nodes = [node for node in tree.body
+             if (isinstance(node, ast.ClassDef) and node.name == 'RssSubscribeSmart')
+             or (isinstance(node, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == 'history_lock'
+                         for t in node.targets))]
     namespace['_PluginBase'] = object
     exec(compile(ast.Module(body=nodes, type_ignores=[]), '<production_plugin>', 'exec',
                  flags=__future__.annotations.compiler_flag), namespace)
@@ -831,6 +836,283 @@ class SiteMetadataFlowTests(unittest.TestCase):
         f.run_round([f.release(link='https://m-team.cc/1')])
         self.assertEqual(captured[0].site, 12)
         self.assertIs(captured[0], f.submitted_infos[0])
+
+
+class HistoryLifecycleTests(unittest.TestCase):
+    """执行生产 init/check/delete_history，仅用内存存储和临时目录。"""
+
+    def setUp(self):
+        from copy import deepcopy
+        from unittest.mock import Mock
+        self.flow = PluginFlowTests()
+        self.flow.setUp()
+        self.addCleanup(self.flow.doCleanups)
+        self.plugin = self.flow.plugin
+        self.ns = self.flow.namespace
+        self.ns['settings'].TZ = 'UTC'
+        self.ns['settings'].API_TOKEN = 'offline-test-token'
+        self.ns['schemas'] = N(Response=N)
+        self.ns['pytz'] = N(timezone=lambda name: self.ns['datetime'].timezone.utc)
+        self.scheduler = Mock()
+        self.scheduler.get_jobs.return_value = [object()]
+        self.scheduler.running = False
+        self.ns['BackgroundScheduler'] = Mock(return_value=self.scheduler)
+        self.ns['SubscribeChain'] = lambda: N(exists=lambda **kw: False, add=Mock())
+        self.saved = self.flow.saved
+        self.writes, self.configs = [], []
+        self.copy = deepcopy
+        self.plugin.get_data = lambda key: deepcopy(self.saved.get(key))
+        self.plugin.save_data = self.save_data
+        self.plugin.update_config = lambda value: self.configs.append(deepcopy(value))
+        self.plugin.systemmessage = N(put=Mock())
+        self.plugin._action = 'subscribe'
+        self.config = self.plugin.get_form()[1]
+        self.config.update(action='subscribe', address='offline-feed',
+                           tv_min_resolution=2160, movie_min_resolution=1080,
+                           tv_subtitle_mode='required', movie_subtitle_mode='any',
+                           fix_season_identity=False, max_versions=2,
+                           include='Show', exclude='CAM', save_path='/offline/library',
+                           size_range='1-20', proxy=True, filter=True)
+        self.old = dict(key='old-resource', title='同名作品', time='2026-01-01 00:00:00')
+        self.other = dict(key='other-resource', title='同名作品', time='2026-01-02 00:00:00')
+        self.saved['history'] = [self.copy(self.old), self.copy(self.other)]
+        self.rss = Mock(side_effect=lambda *args, **kw: self.flow.releases)
+        self.ns['RssHelper'] = Mock(return_value=N(parse=self.rss))
+
+    def save_data(self, key, value):
+        self.writes.append((key, self.copy(value)))
+        self.saved[key] = self.copy(value)
+
+    def peer(self):
+        peer = type(self.plugin)()
+        for attr in ('get_data', 'save_data', 'update_config', 'systemmessage',
+                     'chain', 'systemconfig'):
+            setattr(peer, attr, getattr(self.plugin, attr))
+        return peer
+
+    def clear(self, peer=None, **overrides):
+        config = dict(self.config, clear=True, **overrides)
+        (peer or self.plugin).init_plugin(config)
+        return config
+
+    def assert_no_rss(self):
+        self.ns['RssHelper'].assert_not_called()
+        self.flow.site_list.assert_not_called()
+        self.assertEqual(self.flow.submissions, [])
+        self.assertEqual(self.flow.torrent_infos, [])
+
+    def test_clear_immediate_for_enabled_disabled_and_no_address(self):
+        for enabled in (False, True):
+            for address in ('', 'offline-feed'):
+                with self.subTest(enabled=enabled, address=address):
+                    self.saved['history'] = [self.copy(self.old)]
+                    self.clear(self.peer(), enabled=enabled, address=address)
+                    self.assertEqual(self.saved['history'], [])
+                    self.assertEqual(self.peer().get_data('history'), [])
+                    self.assertFalse(self.configs[-1]['clear'])
+                    self.assertFalse(self.configs[-1]['onlyonce'])
+        self.ns['BackgroundScheduler'].assert_not_called()
+        self.assert_no_rss()
+
+    def test_clear_only_does_not_touch_other_data_or_files(self):
+        extras = {key: [{'untouched': key}] for key in
+                  ('pending', 'defer', 'download_history', 'transfer_history', 'qb_tasks')}
+        self.saved.update(self.copy(extras))
+        paths = [Path(self.flow.temp.name, name) for name in
+                 ('rss-download-pending.json', 'rss-defer-cache.json')]
+        for path in paths:
+            path.write_text('原样保留')
+        self.clear()
+        self.assertEqual({k: self.saved[k] for k in extras}, extras)
+        self.assertEqual([p.read_text() for p in paths], ['原样保留'] * 2)
+        self.assertEqual([key for key, value in self.writes], ['history_generation', 'history'])
+        self.assert_no_rss()
+
+    def test_clear_then_check_without_address_returns_without_writes(self):
+        self.clear(address='')
+        writes = self.copy(self.writes)
+        self.plugin.check()
+        self.assertEqual(self.writes, writes)
+        self.assertEqual(self.saved['history'], [])
+        self.assert_no_rss()
+
+    def test_clear_survives_empty_and_failed_rss_fetch(self):
+        for failure in (None, [], RuntimeError('离线抓取失败')):
+            with self.subTest(failure=failure):
+                self.saved['history'] = [self.copy(self.old)]
+                self.clear()
+                self.rss.side_effect = failure if isinstance(failure, Exception) else None
+                self.rss.return_value = failure
+                writes = self.copy(self.writes)
+                self.plugin.check()
+                self.assertEqual(self.saved['history'], [])
+                self.assertEqual(self.writes, writes)
+        self.assertEqual(self.rss.call_count, 3)
+
+    def test_without_clear_failed_fetch_keeps_history(self):
+        before = self.copy(self.saved)
+        self.rss.return_value, self.rss.side_effect = [], None
+        self.plugin.check()
+        self.assertEqual(self.saved, before)
+        self.assertEqual(self.writes, [])
+
+    def test_clear_and_once_clears_before_job_and_resets_both_flags(self):
+        self.scheduler.add_job.side_effect = lambda **kw: self.assertEqual(self.saved['history'], [])
+        config = self.clear(onlyonce=True, address='')
+        self.scheduler.add_job.assert_called_once()
+        self.scheduler.start.assert_called_once()
+        expected = dict(config, clear=False, onlyonce=False)
+        self.assertEqual(self.configs, [expected])
+        self.assertFalse(self.plugin._onlyonce)
+        self.assertFalse(self.plugin._clear)
+        self.assert_no_rss()
+        self.scheduler.add_job.call_args.kwargs['func']()
+        self.assertEqual(self.saved['history'], [])
+        self.assert_no_rss()
+
+    def test_clear_only_preserves_all_existing_settings(self):
+        config = self.clear()
+        self.assertEqual(self.configs, [dict(config, clear=False, onlyonce=False)])
+
+    def test_once_only_preserves_all_settings_and_history(self):
+        config = dict(self.config, onlyonce=True, clear=False)
+        before = self.copy(self.saved)
+        self.plugin.init_plugin(config)
+        self.assertEqual(self.configs, [dict(config, onlyonce=False)])
+        self.assertEqual(self.saved, before)
+        self.assertEqual(self.writes, [])
+        self.scheduler.add_job.assert_called_once()
+        self.assert_no_rss()
+
+    def test_delete_key_only_removes_one_same_title_resource(self):
+        response = self.peer().delete_history(self.old['key'], 'offline-test-token')
+        self.assertTrue(response.success)
+        self.assertEqual(self.saved['history'], [self.other])
+        self.assertEqual(self.saved['history_generation'], 1)
+
+    def test_delete_key_takes_precedence_over_title(self):
+        self.saved['history'].append(dict(key='third', title=self.old['key']))
+        self.assertTrue(self.plugin.delete_history(self.old['key'], 'offline-test-token').success)
+        self.assertEqual([h['key'] for h in self.saved['history']], ['other-resource', 'third'])
+
+    def test_legacy_unique_title_and_keyless_row_can_be_deleted(self):
+        for row in (self.old, dict(title='旧版无key', time=self.old['time'])):
+            with self.subTest(row=row):
+                self.saved['history'] = [self.copy(row)]
+                self.assertTrue(self.plugin.delete_history(row['title'], 'offline-test-token').success)
+                self.assertEqual(self.saved['history'], [])
+
+    def test_ambiguous_title_unknown_key_and_wrong_token_do_not_write(self):
+        for key, token in (('同名作品', 'offline-test-token'), ('missing', 'offline-test-token'),
+                           (self.old['key'], 'wrong-token')):
+            with self.subTest(key=key, token=token):
+                before = self.copy(self.saved)
+                self.assertFalse(self.plugin.delete_history(key, token).success)
+                self.assertEqual(self.saved, before)
+                self.assertEqual(self.writes, [])
+
+    def test_page_uses_resource_key_with_legacy_fallback(self):
+        self.saved['history'].append(dict(title='旧版无key', time=self.old['time']))
+        page = self.plugin.get_page()
+        params = [card['content'][0]['events']['click']['params'] for card in page[0]['content']]
+        self.assertEqual({p['key'] for p in params}, {'old-resource', 'other-resource', '旧版无key'})
+        self.assertTrue(all(p['apikey'] == 'offline-test-token' for p in params))
+
+    def paused_round(self, mutation, releases=None):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        entered, resume = Event(), Event()
+        self.flow.releases = releases or [self.flow.release()]
+        def parse(*args, **kw):
+            entered.set()
+            if not resume.wait(10):
+                raise AssertionError('等待并发操作超时')
+            return self.flow.releases
+        self.rss.side_effect = parse
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.plugin.check)
+            try:
+                self.assertTrue(entered.wait(10), '生产check未到达RSS抓取')
+                mutation()
+            finally:
+                resume.set()
+            future.result(timeout=10)
+        self.assertFalse(any('RSS_ITEM_DEFER' in line for line in self.flow.logs), self.flow.logs)
+        self.rss.side_effect = lambda *args, **kw: self.flow.releases
+
+    def test_old_round_cannot_restore_clear_from_another_instance(self):
+        self.paused_round(lambda: self.clear(self.peer(), address=''))
+        self.assertEqual(self.saved['history'], [])
+        self.assertEqual([k for k, v in self.writes], ['history_generation', 'history'])
+        # 清理后下一轮仍能正常记录，不永久阻断历史。
+        self.flow.run_round([self.flow.release('S01E02', eps=(2,))])
+        self.assertEqual([h['key'] for h in self.saved['history']], [self.flow.releases[0]['title']])
+
+    def test_old_round_cannot_restore_single_deleted_record(self):
+        release = self.flow.release()
+        self.old['key'] = release['title']
+        self.saved['history'] = [self.copy(self.old), self.copy(self.other)]
+        # 下载模式会重新记录相同key，验证新增也不能复活已删记录。
+        self.plugin._action = 'download'
+        self.paused_round(lambda: self.assertTrue(
+            self.peer().delete_history(release['title'], 'offline-test-token').success), [release])
+        self.assertEqual(self.saved['history'], [self.other])
+        self.assertEqual(len(self.flow.submissions), 1)
+        self.flow.run_round([self.flow.release('S01E02', eps=(2,))])
+        self.assertEqual(len(self.saved['history']), 2)
+        self.assertEqual(self.saved['history'][0], self.other)
+
+    def test_old_round_keeps_post_clear_new_round_history(self):
+        new = self.flow.release('S01E02', eps=(2,))
+        def mutation():
+            peer = self.peer()
+            self.clear(peer, size_range='', tv_min_resolution=0,
+                       tv_subtitle_mode='any', filter=False)
+            old_releases = self.flow.releases
+            self.rss.side_effect = lambda *args, **kw: [new]
+            peer.check()
+            self.flow.releases = old_releases
+        self.paused_round(mutation)
+        self.assertEqual([h['key'] for h in self.saved['history']], [new['title']])
+
+    def test_concurrent_rounds_merge_only_additions_without_lost_update(self):
+        new = self.flow.release('S01E02', eps=(2,))
+        def mutation():
+            peer = self.peer()
+            peer._address, peer._action = 'offline-feed', 'subscribe'
+            self.rss.side_effect = lambda *args, **kw: [new]
+            peer.check()
+        self.paused_round(mutation)
+        self.assertEqual({h['key'] for h in self.saved['history']},
+                         {'old-resource', 'other-resource', new['title'], self.flow.release()['title']})
+
+    def test_reinitializing_saved_clear_config_does_not_clear_again(self):
+        self.clear()
+        self.saved['history'] = [self.copy(self.other)]
+        generation = self.saved['history_generation']
+        self.plugin.init_plugin(self.configs[-1])
+        self.assertEqual(self.saved['history'], [self.other])
+        self.assertEqual(self.saved['history_generation'], generation)
+        self.assertEqual(len(self.configs), 1)
+        self.assert_no_rss()
+
+    def test_old_round_without_additions_cannot_restore_deleted_snapshot(self):
+        self.paused_round(lambda: self.assertTrue(
+            self.peer().delete_history(self.old['key'], 'offline-test-token').success),
+            releases=[{'title': ''}])
+        self.assertEqual(self.saved['history'], [self.other])
+        self.assertEqual([k for k, v in self.writes], ['history_generation', 'history'])
+
+    def test_generation_survives_new_instance_and_new_class(self):
+        self.clear()
+        generation = self.saved['history_generation']
+        namespace = dict(self.ns)
+        peer = load_plugin_class(namespace)()
+        peer.get_data, peer.save_data = self.plugin.get_data, self.plugin.save_data
+        peer._merge_history(generation - 1, [self.old])
+        self.assertEqual(self.saved['history'], [])
+        peer._merge_history(generation, [self.other])
+        self.assertEqual(self.saved['history'], [self.other])
 
 
 if __name__ == '__main__':

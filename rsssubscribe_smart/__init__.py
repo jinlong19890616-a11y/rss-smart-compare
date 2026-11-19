@@ -37,6 +37,8 @@ from app.schemas import ExistMediaInfo
 from app.schemas.types import SystemConfigKey, MediaType
 
 lock = Lock()
+# 仅保护插件历史的短读改写，跨插件实例共享，不占用下载/网络锁。
+history_lock = Lock()
 
 # Cap the extra TMDB detail lookups for one suspicious title.
 MAX_SEASON_IDENTITY_CANDIDATES = 10
@@ -193,7 +195,7 @@ class RssSubscribeSmart(_PluginBase):
     # 插件图标
     plugin_icon = "rss.png"
     # 插件版本
-    plugin_version = "0.8.11"
+    plugin_version = "0.8.12"
     # 插件作者
     plugin_author = "local-compare"
     # 作者主页
@@ -220,7 +222,6 @@ class RssSubscribeSmart(_PluginBase):
     _proxy: bool = False
     _filter: bool = False
     _clear: bool = False
-    _clearflag: bool = False
     _action: str = "subscribe"
     _save_path: str = ""
     _size_range: str = ""
@@ -267,6 +268,13 @@ class RssSubscribeSmart(_PluginBase):
             fix_value = config.get("fix_season_identity")
             self._fix_season_identity = True if fix_value is None else bool(fix_value)
 
+        if self._clear:
+            # 保存配置时立即清空，与开关、地址和 RSS 执行结果无关。
+            with history_lock:
+                generation = self.get_data('history_generation') or 0
+                self.save_data('history_generation', generation + 1)
+                self.save_data('history', [])
+
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             logger.info(f"自定义订阅服务启动，立即运行一次")
@@ -283,8 +291,6 @@ class RssSubscribeSmart(_PluginBase):
         if self._onlyonce or self._clear:
             # 关闭一次性开关
             self._onlyonce = False
-            # 记录清理缓存设置
-            self._clearflag = self._clear
             # 关闭清理缓存开关
             self._clear = False
             # 保存设置
@@ -694,7 +700,7 @@ class RssSubscribeSmart(_PluginBase):
                                     'api': 'plugin/RssSubscribeSmart/delete_history',
                                     'method': 'get',
                                     'params': {
-                                        'key': title,
+                                        'key': history.get('key') or title,
                                         'apikey': settings.API_TOKEN
                                     }
                                 }
@@ -783,14 +789,31 @@ class RssSubscribeSmart(_PluginBase):
         """
         if apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
-        # 历史记录
-        historys = self.get_data('history')
-        if not historys:
-            return schemas.Response(success=False, message="未找到历史记录")
-        # 删除指定记录
-        historys = [h for h in historys if h.get("title") != key]
-        self.save_data('history', historys)
+        with history_lock:
+            historys = self.get_data('history') or []
+            matches = [i for i, h in enumerate(historys) if h.get('key') == key]
+            if not matches:
+                # 兼容旧页面标题参数，但同名不同资源不能批量误删。
+                matches = [i for i, h in enumerate(historys) if h.get('title') == key]
+            if not matches:
+                return schemas.Response(success=False, message="未找到历史记录")
+            if len(matches) != 1:
+                return schemas.Response(success=False, message="存在同名历史记录，请刷新页面后重试")
+            generation = self.get_data('history_generation') or 0
+            self.save_data('history_generation', generation + 1)
+            self.save_data('history', [h for i, h in enumerate(historys) if i != matches[0]])
         return schemas.Response(success=True, message="删除成功")
+
+    def _merge_history(self, generation, additions):
+        with history_lock:
+            if generation != (self.get_data('history_generation') or 0):
+                # 清理/单删前启动的旧轮不再写入；下一新轮仍可记录。
+                return
+            history = list(self.get_data('history') or [])
+            for entry in additions:
+                history = [h for h in history if h.get('key') != entry['key']]
+                history.append(entry)
+            self.save_data('history', history)
 
     def __update_config(self):
         """
@@ -810,6 +833,10 @@ class RssSubscribeSmart(_PluginBase):
             "action": self._action,
             "save_path": self._save_path,
             "size_range": self._size_range,
+            "tv_min_resolution": self._tv_min_resolution,
+            "movie_min_resolution": self._movie_min_resolution,
+            "tv_subtitle_mode": self._tv_subtitle_mode,
+            "movie_subtitle_mode": self._movie_subtitle_mode,
             "fix_season_identity": self._fix_season_identity,
             "max_versions": self._max_versions
         })
@@ -820,11 +847,10 @@ class RssSubscribeSmart(_PluginBase):
         """
         if not self._address:
             return
-        # 读取历史记录
-        if self._clearflag:
-            history = []
-        else:
-            history: List[dict] = self.get_data('history') or []
+        with history_lock:
+            history_generation = self.get_data('history_generation') or 0
+            history = list(self.get_data('history') or [])
+        history_additions = []
         download_mode = self._action in ("download", "download_subscribe")
         sites = ()
         if download_mode:
@@ -1226,7 +1252,7 @@ class RssSubscribeSmart(_PluginBase):
                                            username="RSS订阅")
                     # 存储历史记录
                     history = [h for h in history if h.get("key") != title]
-                    history.append({
+                    entry = {
                         "title": f"{mediainfo.title} {meta.season}",
                         "key": f"{title}",
                         "type": mediainfo.type.value,
@@ -1235,7 +1261,9 @@ class RssSubscribeSmart(_PluginBase):
                         "overview": mediainfo.overview,
                         "tmdbid": mediainfo.tmdb_id,
                         "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
+                    }
+                    history.append(entry)
+                    history_additions.append(entry)
                 except Exception as err:
                     logger.error(f'RSS_ITEM_DEFER {title if "title" in locals() else "<unknown>"}: {str(err)}')
             logger.info(f"RSS {url} 刷新完成")
@@ -1250,10 +1278,8 @@ class RssSubscribeSmart(_PluginBase):
                 f"RSS_SEASON_IDENTITY_SUMMARY suspect={season_fixer.stats['suspect']} "
                 f"fixed={season_fixer.stats['fixed']} kept={season_fixer.stats['skipped']}"
             )
-        # 保存历史记录
-        self.save_data('history', history)
-        # 缓存只清理一次
-        self._clearflag = False
+        # 仅合并本轮新增，不用轮初快照覆盖并发清理、删除或其他轮新增。
+        self._merge_history(history_generation, history_additions)
 
     def __log_and_notify_error(self, message):
         """
